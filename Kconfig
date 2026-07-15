@@ -23,6 +23,26 @@ config XEN_STORE_SRV_SHELL_CMDS
 	help
 	  Enable shell for XenStore server.
 
+config XEN_STORE_CLIENT
+	bool "Enable XenStore client (frontend)"
+	select XEN_STORE_COMMON
+	help
+	  Enable the xenstore client/frontend library, for a DomU (guest) that
+	  needs to talk to the xenstore server. It maps the guest's own xenstore
+	  ring (HVM_PARAM_STORE_PFN), completes the connection handshake
+	  (RECONNECT -> CONNECTED, as required for dom0less guests whose ring Xen
+	  initialises to XENSTORE_RECONNECT), binds the store event channel
+	  (HVM_PARAM_STORE_EVTCHN) and provides basic read/write transactions.
+
+config XEN_STORE_CLIENT_AUTO_CONNECT
+	bool "Connect the XenStore client automatically at boot"
+	depends on XEN_STORE_CLIENT
+	default y
+	help
+	  Run xs_client_connect() from a SYS_INIT hook at boot. The hook is a
+	  no-op on domains without a provisioned store event channel (e.g. the
+	  xenstore domain itself), so it only acts on real client guests.
+
 config XEN_LIBFDT
 	bool "Enable libfdt support"
 	help
