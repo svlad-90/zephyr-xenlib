@@ -185,6 +185,58 @@ static int allocate_magic_pages(int domid)
 	return rc;
 }
 
+static int allocate_dom0less_xenstore_page(uint32_t domid, uint64_t *max_mem_kb,
+					   xen_pfn_t *store_pfn)
+{
+	const xen_pfn_t xenstore_pfn = XEN_PHYS_PFN(GUEST_MAGIC_BASE) +
+				       XENSTORE_PFN_OFFSET;
+	uint64_t populated_gfn;
+	void *mapped_store;
+	int rc;
+
+	if (!max_mem_kb || !store_pfn) {
+		return -EINVAL;
+	}
+
+	*max_mem_kb += XEN_PAGE_SIZE / 1024;
+	rc = xen_domctl_max_mem(domid, *max_mem_kb);
+	if (rc) {
+		LOG_ERR("dom0less:domid:%u set max memory err (%d)", domid, rc);
+		return rc;
+	}
+
+	populated_gfn = xenmem_populate_physmap(domid, xenstore_pfn,
+						PFN_4K_SHIFT, 1);
+	if (populated_gfn != 1) {
+		LOG_ERR("dom0less:domid:%u populate xenstore page ret=%llu",
+			domid, populated_gfn);
+		return -ENOMEM;
+	}
+
+	rc = xenmem_map_region(domid, 1, xenstore_pfn, &mapped_store);
+	if (rc) {
+		LOG_ERR("dom0less:domid:%u map xenstore page err (%d)", domid, rc);
+		return rc;
+	}
+
+	memset(mapped_store, 0, XEN_PAGE_SIZE);
+	rc = xenmem_cacheflush_mapped_pfns(1, xenstore_pfn);
+	if (rc) {
+		LOG_ERR("dom0less:domid:%u flush xenstore page err (%d)", domid, rc);
+	}
+
+	if (xenmem_unmap_region(1, mapped_store)) {
+		LOG_ERR("dom0less:domid:%u unmap xenstore page err", domid);
+	}
+
+	if (rc) {
+		return rc;
+	}
+
+	*store_pfn = xenstore_pfn;
+	return 0;
+}
+
 /* We need to populate magic pages and memory map here */
 static int prepare_domain_physmap(int domid, uint64_t base_pfn, struct xen_domain_cfg *cfg)
 {
@@ -1025,7 +1077,7 @@ static int dom0less_get_next_domain(uint32_t domid_start, struct xen_domctl_getd
 static int dom0less_init_domain(uint32_t domid, struct xen_domctl_getdomaininfo *infos)
 {
 	struct xen_domain *domain;
-	xen_pfn_t magic_base_pfn;
+	xen_pfn_t store_pfn;
 	uint64_t value;
 	int rc;
 
@@ -1046,10 +1098,11 @@ static int dom0less_init_domain(uint32_t domid, struct xen_domctl_getdomaininfo 
 
 	/*
 	 * Xenstore initialization.
-	 * In dom0less boot case the Xenstore event is already allocated and also allocated
-	 * XEN_MAGIC pages, so Dom0 here should get them and use to init Xenstore.
-	 * At the end Dom0 should set HVM_PARAM_STORE_PFN
-	 * to notify guest domain that Xenstore is ready.
+	 * Xen allocates the event channel for an enhanced dom0less domain.
+	 * Newer Xen can also allocate and publish HVM_PARAM_STORE_PFN during
+	 * domain build. Older Xen leaves HVM_PARAM_STORE_PFN as ~0ULL until
+	 * Dom0 performs the init-dom0less handoff. Zephyr Dom0 does not run
+	 * the Linux helper, so handle both cases here.
 	 */
 	rc = hvm_get_parameter(HVM_PARAM_STORE_EVTCHN, domain->domid, &value);
 	if (rc) {
@@ -1061,23 +1114,30 @@ static int dom0less_init_domain(uint32_t domid, struct xen_domctl_getdomaininfo 
 	LOG_DBG("dom0less: remote_domid=%d, xenstore.remote_evtchn = %d", domain->domid,
 		domain->xenstore.remote_evtchn);
 
-	rc = hvm_get_parameter(HVM_PARAM_MAGIC_BASE_PFN, domid, &magic_base_pfn);
-	if (rc < 0) {
-		LOG_ERR("dom0less:domid:%u Get HVM_PARAM_MAGIC_BASE_PFN err (%d)", domid, rc);
+	rc = hvm_get_parameter(HVM_PARAM_STORE_PFN, domid, &value);
+	if (rc) {
+		LOG_ERR("dom0less:domid:%u Get HVM_PARAM_STORE_PFN err (%d)", domid, rc);
 		goto err_free;
 	}
 
-	LOG_DBG("dom0less:domid:%u MAGIC_BASE_PFN %llx", domid, magic_base_pfn);
-	magic_base_pfn = magic_base_pfn + XENSTORE_PFN_OFFSET;
+	if (value == ~0ULL) {
+		rc = allocate_dom0less_xenstore_page(domid, &domain->max_mem_kb,
+						     &store_pfn);
+		if (rc) {
+			goto err_free;
+		}
+	} else {
+		store_pfn = value;
+	}
 
 	/* init Xenstore */
-	rc = start_domain_stored(domain, magic_base_pfn);
+	rc = start_domain_stored(domain, store_pfn);
 	if (rc) {
 		LOG_ERR("dom0less:domid:%u start Xenstore err (%d)", domid, rc);
 		goto err_free;
 	}
 
-	rc = hvm_set_parameter(HVM_PARAM_STORE_PFN, domid, magic_base_pfn);
+	rc = hvm_set_parameter(HVM_PARAM_STORE_PFN, domid, store_pfn);
 	if (rc) {
 		LOG_ERR("dom0less:domid:%u set HVM_PARAM_STORE_PFN err (%d)", domid, rc);
 		goto err_free_stored;
