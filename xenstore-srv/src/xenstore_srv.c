@@ -275,6 +275,7 @@ static struct xs_entry *key_to_entry(const char *key)
 	for (tok = strtok_r(key_buffer, "/", &tok_state);
 	     tok != NULL;
 	     tok = strtok_r(NULL, "/", &tok_state)) {
+		iter = NULL;
 		SYS_DLIST_FOR_EACH_CONTAINER_SAFE (inspected_list, iter, next, node) {
 			if (strcmp(iter->key, tok) == 0) {
 				break;
@@ -788,6 +789,7 @@ static int xss_do_write(const char *const_path, const char *data, uint32_t domid
 	parent_entry = &root_xenstore;
 
 	for (tok = strtok_r(path, "/", &tok_state); tok != NULL; tok = strtok_r(NULL, "/", &tok_state)) {
+		iter = NULL;
 		SYS_DLIST_FOR_EACH_CONTAINER(&parent_entry->child_list, iter, node) {
 			if (strcmp(iter->key, tok) == 0) {
 				break;
@@ -2032,4 +2034,3 @@ int xs_init_root(void)
 
 	return set_perms_by_array(&root_xenstore, &permissions, 1);
 }
-
