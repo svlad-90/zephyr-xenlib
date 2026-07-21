@@ -1375,8 +1375,14 @@ static void handle_set_perms(struct xenstore *xenstore, uint32_t id,
 	k_mutex_lock(&xsel_mutex, K_FOREVER);
 	entry = key_to_entry_check_perm(path, xenstore->domain->domid, XS_PERM_NONE);
 	k_free(path);
-	if (!entry && is_owner(entry, xenstore->domain->domid)) {
+	if (!entry) {
 		k_mutex_unlock(&xsel_mutex);
+		send_errno(xenstore, id, ENOENT);
+		return;
+	}
+	if (!is_owner(entry, xenstore->domain->domid)) {
+		k_mutex_unlock(&xsel_mutex);
+		send_errno(xenstore, id, EACCES);
 		return;
 	}
 
