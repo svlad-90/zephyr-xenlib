@@ -43,6 +43,35 @@ config XEN_STORE_CLIENT_AUTO_CONNECT
 	  no-op on domains without a provisioned store event channel (e.g. the
 	  xenstore domain itself), so it only acts on real client guests.
 
+config XEN_STORE_CLIENT_MAX_PENDING
+	int "Maximum number of pending XenStore client requests"
+	depends on XEN_STORE_CLIENT
+	default 8
+	range 1 64
+	help
+	  Maximum total number of in-flight requests for this XenStore client.
+	  Additional callers wait until a pending slot is free. Ring writes are
+	  still serialized, but callers do not hold a global request/response
+	  mutex while waiting for replies. Each registered request still uses
+	  the XenStore reply timeout.
+
+config XEN_STORE_CLIENT_RX_STACK_SIZE
+	int "XenStore client RX thread stack size"
+	depends on XEN_STORE_CLIENT
+	default 2048
+	help
+	  Stack size for the XenStore client receive thread that dispatches
+	  replies by request id and handles asynchronous watch events.
+
+config XEN_STORE_CLIENT_RX_PRIORITY
+	int "XenStore client RX thread priority"
+	depends on XEN_STORE_CLIENT
+	default 1
+	help
+	  Priority for the XenStore client receive thread. Keep it preemptible
+	  and below normal application threads because the receive path may poll
+	  the ring when an event-channel notification is missed.
+
 config XEN_LIBFDT
 	bool "Enable libfdt support"
 	help
