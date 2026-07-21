@@ -1929,7 +1929,7 @@ int start_domain_stored(struct xen_domain *domain, xen_pfn_t store_pfn)
 				       xenstore->remote_evtchn);
 		if (rc) {
 			LOG_ERR("Failed to set domain xenbus evtchn param (rc=%d)", rc);
-			goto unmap_ring;
+			goto close_evtchn;
 		}
 	}
 
@@ -1940,8 +1940,26 @@ int start_domain_stored(struct xen_domain *domain, xen_pfn_t store_pfn)
 			xenstore_evt_thrd,
 			domain, NULL, NULL, 7, 0, K_NO_WAIT);
 
+	rc = unmask_event_channel(xenstore->local_evtchn);
+	if (rc) {
+		LOG_ERR("Failed to unmask xenstore event channel (rc=%d)", rc);
+		goto stop_thread;
+	}
+
 	return 0;
 
+stop_thread:
+	atomic_set(&xenstore->thrd_stop, 1);
+	k_sem_give(&xenstore->xb_sem);
+	k_thread_join(&xenstore->thrd, K_FOREVER);
+	free_stack_idx(xenstore->xs_stack_slot);
+close_evtchn:
+	unbind_event_channel(xenstore->local_evtchn);
+	err_ret = evtchn_close(xenstore->local_evtchn);
+	if (err_ret) {
+		LOG_ERR("Unable to close event channel#%u (rc=%d)",
+			xenstore->local_evtchn, err_ret);
+	}
 unmap_ring:
 	err_ret = xenmem_unmap_region(1, xenstore->domint);
 	if (err_ret < 0) {
