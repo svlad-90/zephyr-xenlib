@@ -10,7 +10,7 @@
 #ifndef XENLIB_XSS_H
 #define XENLIB_XSS_H
 
-#include <xen/public/xen.h>
+#include <xenstore_common.h>
 
 /**
  * @brief Xenstore access control Interface
@@ -20,20 +20,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/**
- * @brief Xenstore entry access permissions
- */
-enum xs_perm {
-	/** Xenstore entry owner permissions */
-	XS_PERM_NONE = 0x0,
-	/** Xenstore entry read permissions for quest domain */
-	XS_PERM_READ = 0x1,
-	/** Xenstore entry write permissions for quest domain */
-	XS_PERM_WRITE = 0x2,
-	/** Xenstore entry both RW permissions for quest domain */
-	XS_PERM_BOTH = XS_PERM_WRITE | XS_PERM_READ
-};
 
 /**
  * Read the value associated with a path.

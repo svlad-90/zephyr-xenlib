@@ -14,10 +14,33 @@
 #include <string.h>
 #include <stdio.h>
 #include <xen/public/io/xs_wire.h>
+#include <xen/public/xen.h>
 
 #include <zephyr/sys/barrier.h>
 #include <zephyr/sys/slist.h>
 #include <zephyr/xen/events.h>
+
+/**
+ * @brief XenStore entry access permissions.
+ */
+enum xs_perm {
+	/** XenStore entry owner permissions. */
+	XS_PERM_NONE = 0x0,
+	/** XenStore entry read permissions for a guest domain. */
+	XS_PERM_READ = 0x1,
+	/** XenStore entry write permissions for a guest domain. */
+	XS_PERM_WRITE = 0x2,
+	/** XenStore entry read/write permissions for a guest domain. */
+	XS_PERM_BOTH = XS_PERM_WRITE | XS_PERM_READ
+};
+
+/**
+ * @brief XenStore wire permission entry.
+ */
+struct xenstore_perm {
+	enum xs_perm perms;
+	domid_t domid;
+};
 
 /**
  * @brief Check whether a given path is absolute.
@@ -139,7 +162,8 @@ int xenstore_ring_write(struct xenstore_domain_interface *intf, const void *data
  * @brief Read data from the XenStore ring buffer.
  *
  * @param intf   Domain interface describing the shared ring.
- * @param data   Destination buffer that receives the data.
+ * @param data   Destination buffer that receives the data, or NULL to discard
+ *               bytes while advancing the consumer index.
  * @param len    Maximum number of bytes to read.
  * @param client Set to true when invoked from a XenStore client context.
  *
@@ -147,6 +171,42 @@ int xenstore_ring_write(struct xenstore_domain_interface *intf, const void *data
  * @retval <0    Negative errno value on failure.
  */
 int xenstore_ring_read(struct xenstore_domain_interface *intf, void *data, size_t len, bool client);
+
+/**
+ * @brief Pack NUL-terminated strings into a XenStore request payload.
+ *
+ * @param buf         Destination payload buffer.
+ * @param buf_len     Size of @p buf.
+ * @param strings     Array of strings to pack.
+ * @param num_strings Number of array entries.
+ * @param payload_len Returned payload length.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  Invalid argument or NULL string entry.
+ * @retval -E2BIG   Destination buffer is too small.
+ */
+int xenstore_pack_strings(char *buf, size_t buf_len, const char *const *strings,
+			  size_t num_strings, size_t *payload_len);
+
+/**
+ * @brief Convert a XenStore permission value to its wire character.
+ *
+ * @param perm Permission value.
+ *
+ * @return XenStore wire permission character.
+ */
+char xenstore_perm_to_char(enum xs_perm perm);
+
+/**
+ * @brief Convert a XenStore wire permission character to a permission value.
+ *
+ * @param perm_char Wire permission character.
+ * @param perm      Returned permission value.
+ *
+ * @retval 0       Success.
+ * @retval -EINVAL Unknown permission character or NULL output pointer.
+ */
+int xenstore_perm_from_char(char perm_char, enum xs_perm *perm);
 
 /**
  * @brief Convert a textual errno representation into its numeric value.

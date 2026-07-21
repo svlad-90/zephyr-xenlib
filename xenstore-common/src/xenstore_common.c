@@ -71,6 +71,76 @@ int xenstore_ring_read(struct xenstore_domain_interface *intf, void *data, size_
 	return len;
 }
 
+int xenstore_pack_strings(char *buf, size_t buf_len, const char *const *strings,
+			  size_t num_strings, size_t *payload_len)
+{
+	size_t off = 0;
+
+	if (!buf || !strings || !payload_len) {
+		return -EINVAL;
+	}
+
+	for (size_t i = 0; i < num_strings; i++) {
+		size_t str_len;
+
+		if (!strings[i]) {
+			return -EINVAL;
+		}
+
+		str_len = xenstore_str_byte_size(strings[i]);
+		if (str_len > buf_len - off) {
+			return -E2BIG;
+		}
+
+		memcpy(buf + off, strings[i], str_len);
+		off += str_len;
+	}
+
+	*payload_len = off;
+
+	return 0;
+}
+
+char xenstore_perm_to_char(enum xs_perm perm)
+{
+	switch (perm & XS_PERM_BOTH) {
+	case XS_PERM_WRITE:
+		return 'w';
+	case XS_PERM_READ:
+		return 'r';
+	case XS_PERM_BOTH:
+		return 'b';
+	default:
+		return 'n';
+	}
+}
+
+int xenstore_perm_from_char(char perm_char, enum xs_perm *perm)
+{
+	if (!perm) {
+		return -EINVAL;
+	}
+
+	switch (perm_char) {
+	case 'w':
+		*perm = XS_PERM_WRITE;
+		break;
+	case 'r':
+		*perm = XS_PERM_READ;
+		break;
+	case 'b':
+		*perm = XS_PERM_BOTH;
+		break;
+	case 'n':
+		*perm = XS_PERM_NONE;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 int xenstore_get_error(const char *errstr, size_t len)
 {
 	size_t i;
