@@ -7,6 +7,8 @@
  */
 
 #include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -76,6 +78,16 @@ static K_THREAD_STACK_DEFINE(xs_rx_stack, CONFIG_XEN_STORE_CLIENT_RX_STACK_SIZE)
 
 /* RX scratch buffer used before a reply is copied into a request ticket. */
 static char xs_rx_payload[XENSTORE_PAYLOAD_MAX];
+/* Protects the callback pointer and its user_data as one consistent pair. */
+static K_MUTEX_DEFINE(xs_watch_cb_lock);
+/* Signalled when the RX thread finishes running the current watch callback. */
+static K_CONDVAR_DEFINE(xs_watch_cb_idle);
+/* True while the RX thread is executing the copied application callback. */
+static bool xs_watch_cb_running;
+/* Single process-wide callback invoked by the RX thread for watch events. */
+static xs_client_watch_cb_t xs_watch_cb;
+/* Opaque application pointer passed back unchanged to xs_watch_cb. */
+static void *xs_watch_cb_data;
 
 static void xs_event_cb(void *priv)
 {
@@ -361,6 +373,57 @@ static void xs_complete_request_error(uint32_t req_id, int rc)
 }
 
 /*
+ * Decode and dispatch one asynchronous XS_WATCH_EVENT message.
+ *
+ * Watch events are not replies to a caller waiting in xs_talk(); they are
+ * server notifications that arrive on the same response ring. The payload is
+ * two NUL-terminated strings packed into one byte buffer: path first, then the
+ * caller-supplied watch token. The RX thread validates both strings stay inside
+ * @payload_len, then calls the single registered application callback.
+ */
+static void xs_handle_watch_event(const char *payload, size_t payload_len)
+{
+	size_t path_len;
+	size_t token_len;
+	const char *token;
+	xs_client_watch_cb_t cb;
+	void *cb_data;
+
+	if (payload_len == 0) {
+		return;
+	}
+
+	path_len = strnlen(payload, payload_len) + 1;
+	if (path_len >= payload_len) {
+		LOG_WRN("malformed xenstore watch event");
+		return;
+	}
+
+	token = payload + path_len;
+	token_len = strnlen(token, payload_len - path_len);
+	if (token_len == payload_len - path_len) {
+		LOG_WRN("malformed xenstore watch event token");
+		return;
+	}
+
+	k_mutex_lock(&xs_watch_cb_lock, K_FOREVER);
+	cb = xs_watch_cb;
+	cb_data = xs_watch_cb_data;
+	if (cb) {
+		xs_watch_cb_running = true;
+	}
+	k_mutex_unlock(&xs_watch_cb_lock);
+
+	if (cb) {
+		cb(payload, token, cb_data);
+		k_mutex_lock(&xs_watch_cb_lock, K_FOREVER);
+		xs_watch_cb_running = false;
+		k_condvar_signal(&xs_watch_cb_idle);
+		k_mutex_unlock(&xs_watch_cb_lock);
+	}
+}
+
+/*
  * Single reader for the XenStore response ring.
  *
  * The response ring is one shared incoming byte stream. Application callers do
@@ -398,7 +461,7 @@ static void xs_rx_thread_fn(void *p1, void *p2, void *p3)
 		}
 
 		if (hdr.type == XS_WATCH_EVENT) {
-			LOG_DBG("unexpected xenstore watch event");
+			xs_handle_watch_event(xs_rx_payload, hdr.len);
 			k_yield();
 			continue;
 		}
@@ -417,8 +480,8 @@ static void xs_rx_thread_fn(void *p1, void *p2, void *p3)
  * not read the response ring; it sleeps on its own ticket until the RX thread
  * completes it or XS_REPLY_TIMEOUT expires.
  */
-static int xs_talk(uint32_t type, uint32_t tx_id, const void *payload,
-		   size_t payload_len, char *out, size_t out_len)
+static int xs_talk(uint32_t type, const void *payload, size_t payload_len,
+		   char *out, size_t out_len)
 {
 	struct xs_pending_req *req;
 	struct xsd_sockmsg hdr;
@@ -443,7 +506,7 @@ static int xs_talk(uint32_t type, uint32_t tx_id, const void *payload,
 	req->payload_len = 0;
 
 	hdr.type = type;
-	hdr.tx_id = tx_id;
+	hdr.tx_id = 0;
 	hdr.len = (uint32_t)payload_len;
 
 	k_mutex_lock(&xs_pending_lock, K_FOREVER);
@@ -509,6 +572,56 @@ wait_done:
 	return (int)plen;
 }
 
+/*
+ * Send a request whose reply must be exactly one NUL-terminated string.
+ *
+ * xs_talk() is the raw transport helper: it copies reply bytes, but it does
+ * not know whether those bytes are a C string, a list of strings, or another
+ * XenStore payload format. This wrapper is for the simpler string-reply APIs.
+ * It reads into a full-size scratch buffer first, checks that the server reply
+ * contains a terminating '\0', then copies the complete string into @out.
+ *
+ * Returns the copied string size including the terminating '\0', or a negative
+ * errno. -ENOSPC means the server did return a valid string, but @out is too
+ * small to hold that whole string plus its terminator.
+ */
+static int xs_talk_string(uint32_t type, const void *payload, size_t payload_len,
+			  char *out, size_t out_len)
+{
+	char *reply;
+	size_t str_len;
+	int rc;
+
+	if (!out || out_len == 0) {
+		return -EINVAL;
+	}
+
+	reply = k_malloc(XENSTORE_PAYLOAD_MAX);
+	if (!reply) {
+		return -ENOMEM;
+	}
+
+	rc = xs_talk(type, payload, payload_len, reply, XENSTORE_PAYLOAD_MAX);
+	if (rc < 0) {
+		k_free(reply);
+		return rc;
+	}
+
+	str_len = strnlen(reply, (size_t)rc);
+	if (str_len == (size_t)rc) {
+		k_free(reply);
+		return -EINVAL;
+	}
+	if (str_len + 1 > out_len) {
+		k_free(reply);
+		return -ENOSPC;
+	}
+
+	memcpy(out, reply, str_len + 1);
+	k_free(reply);
+	return (int)(str_len + 1);
+}
+
 int xs_client_write(const char *path, const char *value)
 {
 	char *buf;
@@ -532,7 +645,7 @@ int xs_client_write(const char *path, const char *value)
 	memcpy(buf, path, pl);           /* path + NUL */
 	memcpy(buf + pl, value, vl);     /* value (no trailing NUL) */
 
-	rc = xs_talk(XS_WRITE, 0, buf, pl + vl, NULL, 0);
+	rc = xs_talk(XS_WRITE, buf, pl + vl, NULL, 0);
 	k_free(buf);
 	return rc < 0 ? rc : 0;
 }
@@ -548,7 +661,7 @@ int xs_client_read(const char *path, char *out, size_t out_len)
 		return -EINVAL;
 	}
 
-	rc = xs_talk(XS_READ, 0, path, strlen(path) + 1, out, out_len);
+	rc = xs_talk(XS_READ, path, strlen(path) + 1, out, out_len);
 	if (rc < 0) {
 		return rc;
 	}
@@ -559,6 +672,278 @@ int xs_client_read(const char *path, char *out, size_t out_len)
 
 	out[rc] = '\0';
 	return rc;
+}
+
+int xs_client_directory(const char *path, char *out, size_t out_len)
+{
+	int rc;
+
+	if (!path) {
+		return -EINVAL;
+	}
+	if (!out || out_len == 0) {
+		return -EINVAL;
+	}
+
+	rc = xs_talk(XS_DIRECTORY, path, strlen(path) + 1, out, out_len);
+	if (rc < 0) {
+		return rc;
+	}
+	if ((size_t)rc > out_len) {
+		return -ENOSPC;
+	}
+
+	return rc;
+}
+
+int xs_client_mkdir(const char *path)
+{
+	int rc;
+
+	if (!path) {
+		return -EINVAL;
+	}
+
+	rc = xs_talk(XS_MKDIR, path, strlen(path) + 1, NULL, 0);
+	return rc < 0 ? rc : 0;
+}
+
+int xs_client_rm(const char *path)
+{
+	int rc;
+
+	if (!path) {
+		return -EINVAL;
+	}
+
+	rc = xs_talk(XS_RM, path, strlen(path) + 1, NULL, 0);
+	return rc < 0 ? rc : 0;
+}
+
+/*
+ * Decode one XenStore permission string into the public permission struct.
+ *
+ * The server sends permissions as text entries such as "b1" or "r42": the
+ * first character is the access mode, and the decimal suffix is the domain id
+ * the mode applies to. This helper parses one such entry after the caller has
+ * split the raw XS_GET_PERMS reply into individual NUL-terminated strings.
+ */
+static int xs_parse_perm_string(const char *str, struct xenstore_perm *perm)
+{
+	char *endptr;
+	int rc;
+
+	if (!str || !perm) {
+		return -EINVAL;
+	}
+
+	rc = xenstore_perm_from_char(str[0], &perm->perms);
+	if (rc) {
+		return rc;
+	}
+
+	perm->domid = strtoul(str + 1, &endptr, 10);
+	if (*endptr != '\0') {
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+int xs_client_get_perms(const char *path, struct xenstore_perm *perms,
+			size_t *num_perms)
+{
+	char *payload;
+	size_t off = 0, count = 0, capacity;
+	int rc;
+
+	if (!path || !num_perms) {
+		return -EINVAL;
+	}
+
+	capacity = *num_perms;
+	payload = k_malloc(XENSTORE_PAYLOAD_MAX);
+	if (!payload) {
+		return -ENOMEM;
+	}
+
+	rc = xs_talk(XS_GET_PERMS, path, strlen(path) + 1, payload,
+		     XENSTORE_PAYLOAD_MAX);
+	if (rc < 0) {
+		k_free(payload);
+		return rc;
+	}
+
+	while (off < (size_t)rc) {
+		size_t remaining = (size_t)rc - off;
+		size_t len = strnlen(payload + off, remaining);
+
+		if (len == remaining) {
+			k_free(payload);
+			return -EINVAL;
+		}
+		if (perms && count < capacity) {
+			int parse_rc = xs_parse_perm_string(payload + off, &perms[count]);
+
+			if (parse_rc) {
+				k_free(payload);
+				return parse_rc;
+			}
+		}
+		count++;
+		off += len + 1;
+	}
+
+	if (perms && capacity < count) {
+		*num_perms = count;
+		k_free(payload);
+		return -ENOSPC;
+	}
+
+	*num_perms = count;
+	k_free(payload);
+	return 0;
+}
+
+/*
+ * Append one permission entry to an XS_SET_PERMS request payload.
+ *
+ * XenStore sends permissions as compact strings: access character followed by
+ * domain id, for example "b1". @off points to the next free byte in @buf.
+ * snprintk() writes the entry plus its terminating '\0'; on success @off moves
+ * past that terminator so the next permission string can be appended directly
+ * after it.
+ */
+static int xs_append_perm(char *buf, size_t buf_len, size_t *off,
+			  const struct xenstore_perm *perm)
+{
+	int len;
+
+	if (!buf || !off || !perm || *off >= buf_len) {
+		return -EINVAL;
+	}
+
+	len = snprintk(buf + *off, buf_len - *off, "%c%u",
+		       xenstore_perm_to_char(perm->perms), perm->domid);
+	if (len < 0 || (size_t)len >= buf_len - *off) {
+		return -E2BIG;
+	}
+
+	*off += (size_t)len + 1;
+
+	return 0;
+}
+
+int xs_client_set_perms(const char *path, const struct xenstore_perm *perms,
+			size_t num_perms)
+{
+	char *payload;
+	size_t off;
+	int rc;
+
+	if (!path || !perms || num_perms == 0) {
+		return -EINVAL;
+	}
+
+	off = strlen(path) + 1;
+	if (off >= XENSTORE_PAYLOAD_MAX) {
+		return -E2BIG;
+	}
+	payload = k_malloc(XENSTORE_PAYLOAD_MAX);
+	if (!payload) {
+		return -ENOMEM;
+	}
+	memcpy(payload, path, off);
+
+	for (size_t i = 0; i < num_perms; i++) {
+		rc = xs_append_perm(payload, XENSTORE_PAYLOAD_MAX, &off, &perms[i]);
+		if (rc) {
+			k_free(payload);
+			return rc;
+		}
+	}
+
+	rc = xs_talk(XS_SET_PERMS, payload, off, NULL, 0);
+	k_free(payload);
+	return rc < 0 ? rc : 0;
+}
+
+void xs_client_set_watch_callback(xs_client_watch_cb_t cb, void *user_data)
+{
+	k_mutex_lock(&xs_watch_cb_lock, K_FOREVER);
+	while (xs_watch_cb_running && k_current_get() != &xs_rx_thread) {
+		k_condvar_wait(&xs_watch_cb_idle, &xs_watch_cb_lock, K_FOREVER);
+	}
+	xs_watch_cb = cb;
+	xs_watch_cb_data = user_data;
+	k_mutex_unlock(&xs_watch_cb_lock);
+}
+
+/*
+ * Send XS_WATCH or XS_UNWATCH.
+ *
+ * Both requests use the same wire payload shape: the watched path followed by
+ * the caller-chosen token, packed as two adjacent NUL-terminated strings
+ * (`path\0token\0`). @type selects whether the server should add or remove
+ * that watch entry.
+ */
+static int xs_watch_op(uint32_t type, const char *path, const char *token)
+{
+	char *payload;
+	const char *strings[] = { path, token };
+	size_t payload_len;
+	int rc;
+
+	if (!path || !token) {
+		return -EINVAL;
+	}
+
+	payload = k_malloc(XENSTORE_PAYLOAD_MAX);
+	if (!payload) {
+		return -ENOMEM;
+	}
+
+	rc = xenstore_pack_strings(payload, XENSTORE_PAYLOAD_MAX, strings,
+				   ARRAY_SIZE(strings), &payload_len);
+	if (rc) {
+		k_free(payload);
+		return rc;
+	}
+
+	rc = xs_talk(type, payload, payload_len, NULL, 0);
+	k_free(payload);
+	return rc < 0 ? rc : 0;
+}
+
+int xs_client_watch(const char *path, const char *token)
+{
+	return xs_watch_op(XS_WATCH, path, token);
+}
+
+int xs_client_unwatch(const char *path, const char *token)
+{
+	return xs_watch_op(XS_UNWATCH, path, token);
+}
+
+int xs_client_reset_watches(void)
+{
+	int rc = xs_talk(XS_RESET_WATCHES, NULL, 0, NULL, 0);
+
+	return rc < 0 ? rc : 0;
+}
+
+int xs_client_get_domain_path(domid_t domid, char *out, size_t out_len)
+{
+	char payload[16];
+	int len;
+
+	len = snprintk(payload, sizeof(payload), "%u", domid);
+	if (len < 0 || (size_t)len >= sizeof(payload)) {
+		return -E2BIG;
+	}
+
+	return xs_talk_string(XS_GET_DOMAIN_PATH, payload, (size_t)len, out,
+			      out_len);
 }
 
 #ifdef CONFIG_XEN_STORE_CLIENT_AUTO_CONNECT
