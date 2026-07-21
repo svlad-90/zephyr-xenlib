@@ -1445,10 +1445,14 @@ static int xss_do_rm(const char *key, uint32_t caller_id)
 	struct xs_entry *entry;
 
 	k_mutex_lock(&xsel_mutex, K_FOREVER);
-	entry = key_to_entry_check_perm(key, caller_id, XS_PERM_WRITE);
+	entry = key_to_entry(key);
 	if (!entry) {
 		k_mutex_unlock(&xsel_mutex);
-		return -EINVAL;
+		return -ENOENT;
+	}
+	if (!check_perms_for_entry(entry, caller_id, XS_PERM_WRITE)) {
+		k_mutex_unlock(&xsel_mutex);
+		return -EACCES;
 	}
 
 	free_node(entry);
@@ -1471,10 +1475,26 @@ int xss_rm(const char *path)
 static void handle_rm(struct xenstore *xenstore, uint32_t id, char *payload,
 	       uint32_t len)
 {
-	if (xss_do_rm(payload, xenstore->domain->domid)) {
-		notify_watchers(payload, xenstore->domain->domid);
-		send_reply_read(xenstore, id, XS_RM, "");
+	char *path;
+	int rc;
+
+	rc = construct_path(payload, xenstore->domain->domid, &path);
+	if (rc) {
+		send_errno(xenstore, id, -rc);
+		return;
 	}
+
+	rc = xss_do_rm(path, xenstore->domain->domid);
+
+	if (rc) {
+		send_errno(xenstore, id, -rc);
+		k_free(path);
+		return;
+	}
+
+	notify_watchers(path, xenstore->domain->domid);
+	k_free(path);
+	send_reply_read(xenstore, id, XS_RM, "");
 }
 
 static void handle_watch(struct xenstore *xenstore, uint32_t id, char *payload,
