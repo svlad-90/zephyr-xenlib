@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  pull_request_target:
+  pull_request:
 
 env:
   sdk_version: ${{ vars.SDK_VERSION  || '0.16.5-1' }}
@@ -32,7 +32,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install west pyelftools protobuf grpcio-tools
-          sudo apt-get install ninja-build protobuf-compiler gperf
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build protobuf-compiler gperf
 
       - name: Cache Zephyr SDK
         id: cache-sdk
@@ -46,9 +47,21 @@ jobs:
         run: |
           mkdir sdk
           cd sdk
-          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${{ env.sdk_version }}/zephyr-sdk-${{ env.sdk_version }}_linux-x86_64.tar.xz
-          tar xf zephyr-sdk-${{ env.sdk_version }}_linux-x86_64.tar.xz
-          rm zephyr-sdk-${{ env.sdk_version }}_linux-x86_64.tar.xz
+          sdk_archive=zephyr-sdk-${{ env.sdk_version }}_linux-x86_64.tar.xz
+          sdk_url=https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${{ env.sdk_version }}/${sdk_archive}
+          for attempt in 1 2 3; do
+            rm -f "${sdk_archive}"
+            wget --progress=dot:giga "${sdk_url}" -O "${sdk_archive}"
+            if tar -tf "${sdk_archive}" >/dev/null; then
+              break
+            fi
+            if [ "${attempt}" = 3 ]; then
+              echo "Downloaded Zephyr SDK archive is invalid after ${attempt} attempts"
+              exit 1
+            fi
+          done
+          tar xf "${sdk_archive}"
+          rm "${sdk_archive}"
 
       - name: Install Zephyr SDK
         run: |
@@ -79,7 +92,6 @@ jobs:
       - name: Check out zephyr-xenlib
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           path: zephyr-xenlib
 
       - name: Build zephyr-dom0-xt
@@ -97,4 +109,3 @@ jobs:
             -D'CONFIG_DOMD_UBOOT_PATH="../u-boot.bin"' \
             -D'CONFIG_DOMD_DTB_PATH="../dtb.dtb"' \
             -D'CONFIG_AOS_ROOT_CA_PATH="../rootca.pem"'
-
