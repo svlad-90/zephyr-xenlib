@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  pull_request_target:
+  pull_request:
 
 env:
   sdk_version: ${{ vars.SDK_VERSION  || '0.16.5-1' }}
@@ -79,7 +79,6 @@ jobs:
       - name: Check out zephyr-xenlib
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           path: zephyr-xenlib
 
       - name: Build zephyr-dom0-xt
