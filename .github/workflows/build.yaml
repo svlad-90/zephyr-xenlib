@@ -32,7 +32,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install west pyelftools protobuf grpcio-tools
-          sudo apt-get install ninja-build protobuf-compiler gperf
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build protobuf-compiler gperf
 
       - name: Cache Zephyr SDK
         id: cache-sdk
