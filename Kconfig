@@ -55,22 +55,31 @@ config XEN_STORE_CLIENT_MAX_PENDING
 	  mutex while waiting for replies. Each registered request still uses
 	  the XenStore reply timeout.
 
+config XEN_STORE_CLIENT_DEFAULT_TIMEOUT_MS
+	int "Default XenStore client request timeout in milliseconds"
+	depends on XEN_STORE_CLIENT
+	default 5000
+	help
+	  Default timeout used by the simple XenStore client APIs. Timeout
+	  variants can override this per request when an application needs a
+	  shorter probe or a longer boot-time wait.
+
 config XEN_STORE_CLIENT_RX_STACK_SIZE
-	int "XenStore client RX thread stack size"
+	int "XenStore client RX workqueue stack size"
 	depends on XEN_STORE_CLIENT
 	default 2048
 	help
-	  Stack size for the XenStore client receive thread that dispatches
-	  replies by request id and handles asynchronous watch events.
+	  Stack size for the XenStore client workqueue that dispatches replies
+	  by request id and handles asynchronous watch events.
 
 config XEN_STORE_CLIENT_RX_PRIORITY
-	int "XenStore client RX thread priority"
+	int "XenStore client RX workqueue priority"
 	depends on XEN_STORE_CLIENT
-	default 1
+	default 0
 	help
-	  Priority for the XenStore client receive thread. Keep it preemptible
-	  and below normal application threads because the receive path may poll
-	  the ring when an event-channel notification is missed.
+	  Priority for the XenStore client receive workqueue. The default
+	  matches the normal application priority used by the reference
+	  workqueue-based client implementation.
 
 config XEN_LIBFDT
 	bool "Enable libfdt support"

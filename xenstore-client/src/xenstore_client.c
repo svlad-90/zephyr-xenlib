@@ -30,16 +30,19 @@
 
 LOG_MODULE_REGISTER(xenstore_client);
 
-#define XS_REPLY_TIMEOUT K_MSEC(5000)
+#ifndef CONFIG_XEN_STORE_CLIENT_DEFAULT_TIMEOUT_MS
+#define CONFIG_XEN_STORE_CLIENT_DEFAULT_TIMEOUT_MS 5000
+#endif
+#define XS_DEFAULT_TIMEOUT K_MSEC(CONFIG_XEN_STORE_CLIENT_DEFAULT_TIMEOUT_MS)
 #define XS_RING_POLL_SPINS 16
 
 /*
  * One in-flight XenStore request.
  *
  * A caller thread creates this ticket before it writes a request into the
- * shared XenStore ring. The RX thread later reads replies from that same ring,
- * finds the ticket by req_id, copies the matching reply here, and wakes the
- * caller through done.
+ * shared XenStore ring. RX work later reads replies from that same ring, finds
+ * the ticket by req_id, copies the matching reply here, and wakes the caller
+ * through done.
  */
 struct xs_pending_req {
 	sys_snode_t node;          /* Link in the global pending-request list. */
@@ -48,18 +51,17 @@ struct xs_pending_req {
 	uint32_t req_id;           /* Wire id used to match a reply to this request. */
 	int rc;                    /* Local transport error, or 0 when a reply arrived. */
 	size_t payload_len;        /* Number of valid reply bytes in payload. */
-	char payload[XENSTORE_PAYLOAD_MAX]; /* Reply body copied by the RX thread. */
+	char *out;                 /* Caller buffer for successful reply bytes. */
+	size_t out_len;            /* Size of the caller buffer. */
 };
 
 static struct xenstore_domain_interface *xs_intf;
 static evtchn_port_t xs_evtchn;
-/* RX waits on this when the response ring is empty. */
-static struct k_sem xs_rx_sem;
 /* TX waits on this when the request ring is full. */
 static struct k_sem xs_tx_sem;
 /* Counts free request tickets; callers wait here when all tickets are busy. */
 static struct k_sem xs_pending_slots;
-/* Serializes connection setup so only one RX thread/ring binding is created. */
+/* Serializes connection setup so only one RX workqueue/ring binding is created. */
 static K_MUTEX_DEFINE(xs_connect_lock);
 /* Serializes bytes written by callers into the shared request ring. */
 static struct k_mutex xs_tx_lock;
@@ -71,29 +73,137 @@ static sys_slist_t xs_pending_reqs;
 static uint32_t xs_req_id;
 /* True after the XenStore page is mapped and the event channel is bound. */
 static bool xs_connected;
+/* Protects the default timeout value used by simple public APIs. */
+static K_MUTEX_DEFINE(xs_default_timeout_lock);
+/* Default blocking policy for APIs that do not take an explicit timeout. */
+static k_timeout_t xs_default_timeout = XS_DEFAULT_TIMEOUT;
 
-static void xs_rx_thread_fn(void *p1, void *p2, void *p3);
-static struct k_thread xs_rx_thread;
+static void xs_rx_work_handler(struct k_work *work);
 static K_THREAD_STACK_DEFINE(xs_rx_stack, CONFIG_XEN_STORE_CLIENT_RX_STACK_SIZE);
+static struct k_work_q xs_rx_workq;
+static struct k_work xs_rx_work;
+static bool xs_rx_workq_started;
 
 /* RX scratch buffer used before a reply is copied into a request ticket. */
 static char xs_rx_payload[XENSTORE_PAYLOAD_MAX];
+static struct xsd_sockmsg xs_rx_hdr;
+static size_t xs_rx_hdr_pos;
+static size_t xs_rx_payload_pos;
+static size_t xs_rx_discard_len;
+/* Protects routed watcher descriptors and legacy callback state. */
+static K_MUTEX_DEFINE(xs_watch_lock);
+/* Signalled when a routed watcher callback finishes. */
+static K_CONDVAR_DEFINE(xs_watch_idle);
+/* Registered application-owned watcher descriptors. */
+static sys_slist_t xs_watchers;
 /* Protects the callback pointer and its user_data as one consistent pair. */
 static K_MUTEX_DEFINE(xs_watch_cb_lock);
-/* Signalled when the RX thread finishes running the current watch callback. */
+/* Signalled when RX work finishes running the current watch callback. */
 static K_CONDVAR_DEFINE(xs_watch_cb_idle);
-/* True while the RX thread is executing the copied application callback. */
+/* True while RX work is executing the copied application callback. */
 static bool xs_watch_cb_running;
-/* Single process-wide callback invoked by the RX thread for watch events. */
+/* Single process-wide callback invoked by RX work for watch events. */
 static xs_client_watch_cb_t xs_watch_cb;
 /* Opaque application pointer passed back unchanged to xs_watch_cb. */
 static void *xs_watch_cb_data;
+
+static k_timeout_t xs_get_default_timeout_locked(void)
+{
+	k_timeout_t timeout;
+
+	k_mutex_lock(&xs_default_timeout_lock, K_FOREVER);
+	timeout = xs_default_timeout;
+	k_mutex_unlock(&xs_default_timeout_lock);
+
+	return timeout;
+}
+
+/*
+ * Allocate the next wire request id.
+ *
+ * XenStore uses req_id to connect a response back to the original request.
+ * Keep id 0 unused because watch events are asynchronous notifications, not
+ * replies to a caller-owned request ticket.
+ *
+ * The caller must hold xs_pending_lock. That lock already protects insertion
+ * into the pending-request list, so it also serializes the small request-id
+ * counter without pulling architecture-specific atomic helpers into the guest.
+ */
+static uint32_t xs_next_req_id(void)
+{
+	uint32_t req_id;
+
+	xs_req_id++;
+	req_id = xs_req_id;
+	if (req_id == 0) {
+		xs_req_id++;
+		req_id = xs_req_id;
+	}
+
+	return req_id;
+}
+
+/*
+ * Wake every caller that is still waiting for a reply.
+ *
+ * This is used for transport-wide failures. In plain terms, if the shared
+ * mailbox is known broken, callers should get the same clear error now instead
+ * of each thread waiting for its own timeout.
+ */
+static void xs_fail_all_pending(int rc)
+{
+	struct xs_pending_req *req;
+	struct xs_pending_req *next;
+
+	k_mutex_lock(&xs_pending_lock, K_FOREVER);
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&xs_pending_reqs, req, next, node) {
+		sys_slist_find_and_remove(&xs_pending_reqs, &req->node);
+		k_sem_give(&xs_pending_slots);
+		req->rc = rc;
+		k_sem_give(&req->done);
+	}
+	k_mutex_unlock(&xs_pending_lock);
+}
+
+static void xs_mark_transport_failed(int rc)
+{
+	k_mutex_lock(&xs_connect_lock, K_FOREVER);
+	xs_connected = false;
+	k_mutex_unlock(&xs_connect_lock);
+
+	xs_fail_all_pending(rc);
+	k_sem_give(&xs_tx_sem);
+}
+
+static bool xs_in_rx_context(void)
+{
+	return xs_rx_workq_started &&
+	       k_current_get() == k_work_queue_thread_get(&xs_rx_workq);
+}
+
+static void xs_rx_submit(void)
+{
+	if (xs_rx_workq_started) {
+		(void)k_work_submit_to_queue(&xs_rx_workq, &xs_rx_work);
+	}
+}
+
+static bool xs_has_pending_requests(void)
+{
+	bool has_pending;
+
+	k_mutex_lock(&xs_pending_lock, K_FOREVER);
+	has_pending = !sys_slist_is_empty(&xs_pending_reqs);
+	k_mutex_unlock(&xs_pending_lock);
+
+	return has_pending;
+}
 
 static void xs_event_cb(void *priv)
 {
 	ARG_UNUSED(priv);
 	/* One Xen doorbell can mean either new replies or freed request space. */
-	k_sem_give(&xs_rx_sem);
+	xs_rx_submit();
 	k_sem_give(&xs_tx_sem);
 }
 
@@ -124,13 +234,30 @@ int xs_client_connect(void)
 		goto out_unlock;
 	}
 
-	k_sem_init(&xs_rx_sem, 0, 1);
 	k_sem_init(&xs_tx_sem, 0, 1);
 	k_sem_init(&xs_pending_slots, CONFIG_XEN_STORE_CLIENT_MAX_PENDING,
 		   CONFIG_XEN_STORE_CLIENT_MAX_PENDING);
 	k_mutex_init(&xs_tx_lock);
 	k_mutex_init(&xs_pending_lock);
 	sys_slist_init(&xs_pending_reqs);
+	sys_slist_init(&xs_watchers);
+	xs_req_id = 0;
+	xs_rx_hdr_pos = 0;
+	xs_rx_payload_pos = 0;
+	xs_rx_discard_len = 0;
+
+	if (!xs_rx_workq_started) {
+		const struct k_work_queue_config cfg = {
+			.name = "xenstore-client-rx",
+		};
+
+		k_work_queue_init(&xs_rx_workq);
+		k_work_init(&xs_rx_work, xs_rx_work_handler);
+		k_work_queue_start(&xs_rx_workq, xs_rx_stack,
+				   K_THREAD_STACK_SIZEOF(xs_rx_stack),
+				   CONFIG_XEN_STORE_CLIENT_RX_PRIORITY, &cfg);
+		xs_rx_workq_started = true;
+	}
 
 	/* Map the guest's own xenstore ring page. */
 	device_map(&va, (uintptr_t)(store_pfn << XEN_PAGE_SHIFT), XEN_PAGE_SIZE,
@@ -144,7 +271,14 @@ int xs_client_connect(void)
 		goto out_unlock;
 	}
 	xs_evtchn = (evtchn_port_t)store_evtchn;
-	unmask_event_channel(xs_evtchn);
+	rc = unmask_event_channel(xs_evtchn);
+	if (rc < 0) {
+		LOG_ERR("unmask store evtchn %u failed (%d)", xs_evtchn, rc);
+		unbind_event_channel(xs_evtchn);
+		(void)evtchn_close(xs_evtchn);
+		xs_evtchn = 0;
+		goto out_unlock;
+	}
 
 	/*
 	 * Reconnection handshake. Xen initialises a dom0less client's ring to
@@ -162,9 +296,7 @@ int xs_client_connect(void)
 	}
 
 	xs_connected = true;
-	k_thread_create(&xs_rx_thread, xs_rx_stack, K_THREAD_STACK_SIZEOF(xs_rx_stack),
-			xs_rx_thread_fn, NULL, NULL, NULL,
-			CONFIG_XEN_STORE_CLIENT_RX_PRIORITY, 0, K_NO_WAIT);
+	xs_rx_submit();
 	LOG_INF("xenstore client connected (gfn 0x%llx, evtchn %u)",
 		store_pfn, xs_evtchn);
 	rc = 0;
@@ -185,28 +317,47 @@ bool xs_client_is_connected(void)
 	return connected;
 }
 
+void xs_client_set_default_timeout(k_timeout_t timeout)
+{
+	k_mutex_lock(&xs_default_timeout_lock, K_FOREVER);
+	xs_default_timeout = timeout;
+	k_mutex_unlock(&xs_default_timeout_lock);
+}
+
+k_timeout_t xs_client_get_default_timeout(void)
+{
+	return xs_get_default_timeout_locked();
+}
+
 /*
  * Copy exactly len request bytes from buf into the XenStore request ring.
  *
  * The request ring is a small shared byte queue from client to server. If it
  * is full, this helper rings the server doorbell and waits on xs_tx_sem until
  * an event suggests the server may have consumed bytes. On success it returns
- * len. On ring/write/wait failure it returns a negative errno.
+ * len. @timeout controls how long to wait when the server has not freed ring
+ * space yet. On ring/write/wait failure it returns a negative errno.
  */
-static int xs_write_all(const void *buf, size_t len)
+static int xs_write_all(const void *buf, size_t len, k_timeout_t timeout)
 {
 	const uint8_t *p = buf;
 	size_t off = 0;
 
 	while (off < len) {
+		if (xenstore_check_indexes(xs_intf->req_cons, xs_intf->req_prod)) {
+			xs_mark_transport_failed(-EIO);
+			return -EIO;
+		}
+
 		int w = xenstore_ring_write(xs_intf, p + off, len - off, true);
 
 		if (w < 0) {
+			xs_mark_transport_failed(w);
 			return w;
 		}
 		if (w == 0) {
 			notify_evtchn(xs_evtchn);
-			if (k_sem_take(&xs_tx_sem, XS_REPLY_TIMEOUT) != 0) {
+			if (k_sem_take(&xs_tx_sem, timeout) != 0) {
 				return -ETIMEDOUT;
 			}
 			continue;
@@ -221,9 +372,9 @@ static int xs_write_all(const void *buf, size_t len)
  * Copy up to len currently available response bytes from the XenStore ring.
  *
  * This helper is intentionally non-blocking for "no bytes available". The RX
- * thread is the only response-ring reader, and xs_read_full() owns the waiting
- * policy. A positive return can therefore be a short read, zero means the ring
- * had no more bytes right now, and a negative value is a ring read error.
+ * work item is the only response-ring reader. A positive return can therefore
+ * be a short read, zero means the ring had no more bytes right now, and a
+ * negative value is a ring read error.
  */
 static int xs_read_all(void *buf, size_t len)
 {
@@ -231,10 +382,16 @@ static int xs_read_all(void *buf, size_t len)
 	size_t off = 0;
 
 	while (off < len) {
+		if (xenstore_check_indexes(xs_intf->rsp_cons, xs_intf->rsp_prod)) {
+			xs_mark_transport_failed(-EIO);
+			return -EIO;
+		}
+
 		int r = xenstore_ring_read(xs_intf, p ? p + off : NULL,
 					   len - off, true);
 
 		if (r < 0) {
+			xs_mark_transport_failed(r);
 			return r;
 		}
 		if (r == 0) {
@@ -246,52 +403,41 @@ static int xs_read_all(void *buf, size_t len)
 	return (int)len;
 }
 
-/*
- * Wait until exactly len response bytes have been consumed.
- *
- * The RX thread uses this when it needs a complete XenStore header or payload
- * before dispatching a message. If buf is NULL, bytes are discarded; this is
- * used to drain an oversized payload so the next message starts at a clean
- * ring position. On success it returns len, otherwise a negative errno.
- */
-static int xs_read_full(void *buf, size_t len)
+static int xs_rsp_avail(size_t *avail)
 {
-	uint8_t *p = buf;
-	size_t off = 0;
+	XENSTORE_RING_IDX cons = xs_intf->rsp_cons;
+	XENSTORE_RING_IDX prod = xs_intf->rsp_prod;
 
-	while (off < len) {
-		int r = xs_read_all(p ? p + off : NULL, len - off);
-
-		if (r < 0) {
-			return r;
-		}
-		if (r == 0) {
-			notify_evtchn(xs_evtchn);
-			for (int i = 0; i < XS_RING_POLL_SPINS; i++) {
-				k_busy_wait(50);
-				r = xs_read_all(p ? p + off : NULL, len - off);
-				if (r != 0) {
-					break;
-				}
-			}
-			if (r == 0) {
-				k_yield();
-				continue;
-			}
-			if (r < 0) {
-				return r;
-			}
-		}
-		off += r;
+	z_barrier_dmem_fence_full();
+	if (xenstore_check_indexes(cons, prod)) {
+		xs_mark_transport_failed(-EIO);
+		*avail = 0;
+		return -EIO;
 	}
-	return (int)len;
+
+	*avail = prod - cons;
+	return 0;
+}
+
+static void xs_rx_frame_reset(void)
+{
+	xs_rx_hdr_pos = 0;
+	xs_rx_payload_pos = 0;
+	xs_rx_discard_len = 0;
+}
+
+static void xs_rx_frame_discard(size_t len)
+{
+	xs_rx_hdr_pos = 0;
+	xs_rx_payload_pos = 0;
+	xs_rx_discard_len = len;
 }
 
 /*
  * Find the pending ticket for one wire request id.
  *
  * The caller must already hold xs_pending_lock because the pending list is
- * shared by caller threads and the RX thread. When prev is not NULL, it is
+ * shared by caller threads and RX work. When prev is not NULL, it is
  * filled with the previous list node so sys_slist_remove() can unlink the
  * found ticket from Zephyr's singly linked list.
  */
@@ -317,7 +463,7 @@ static struct xs_pending_req *xs_find_pending_locked(uint32_t req_id,
 /*
  * Finish one normal server reply and wake the waiting caller.
  *
- * The RX thread calls this after it has read a full XenStore reply. The reply
+ * RX work calls this after it has read a full XenStore reply. The reply
  * still lives in the RX scratch buffer, so this helper finds the caller's
  * pending ticket by req_id, copies the reply into that ticket, returns the
  * pending slot, and gives req->done so the caller can continue.
@@ -341,8 +487,19 @@ static void xs_complete_request(struct xsd_sockmsg *hdr, const char *payload,
 	k_sem_give(&xs_pending_slots);
 	req->hdr = *hdr;
 	req->payload_len = payload_len;
-	memcpy(req->payload, payload, payload_len);
-	req->rc = 0;
+	if (hdr->type == XS_ERROR) {
+		int err = xenstore_get_error(payload, payload_len);
+
+		req->rc = err ? -err : -EIO;
+	} else {
+		if (req->out && req->out_len) {
+			size_t n = payload_len < req->out_len ?
+				payload_len : req->out_len;
+
+			memcpy(req->out, payload, n);
+		}
+		req->rc = 0;
+	}
 	k_sem_give(&req->done);
 	k_mutex_unlock(&xs_pending_lock);
 }
@@ -372,13 +529,37 @@ static void xs_complete_request_error(uint32_t req_id, int rc)
 	k_mutex_unlock(&xs_pending_lock);
 }
 
+static bool xs_watch_path_matches(const char *watch_path, const char *event_path)
+{
+	size_t watch_len;
+
+	if (!watch_path || !event_path) {
+		return false;
+	}
+
+	watch_len = strlen(watch_path);
+	if (strncmp(event_path, watch_path, watch_len) != 0) {
+		return false;
+	}
+
+	return event_path[watch_len] == '\0' || event_path[watch_len] == '/';
+}
+
+static bool xs_watcher_matches(struct xs_client_watcher *watcher,
+			       const char *path, const char *token)
+{
+	return watcher->active && watcher->cb &&
+	       strcmp(watcher->token, token) == 0 &&
+	       xs_watch_path_matches(watcher->path, path);
+}
+
 /*
  * Decode and dispatch one asynchronous XS_WATCH_EVENT message.
  *
  * Watch events are not replies to a caller waiting in xs_talk(); they are
  * server notifications that arrive on the same response ring. The payload is
  * two NUL-terminated strings packed into one byte buffer: path first, then the
- * caller-supplied watch token. The RX thread validates both strings stay inside
+ * caller-supplied watch token. RX work validates both strings stay inside
  * @payload_len, then calls the single registered application callback.
  */
 static void xs_handle_watch_event(const char *payload, size_t payload_len)
@@ -388,6 +569,7 @@ static void xs_handle_watch_event(const char *payload, size_t payload_len)
 	const char *token;
 	xs_client_watch_cb_t cb;
 	void *cb_data;
+	struct xs_client_watcher *watcher;
 
 	if (payload_len == 0) {
 		return;
@@ -421,6 +603,29 @@ static void xs_handle_watch_event(const char *payload, size_t payload_len)
 		k_condvar_signal(&xs_watch_cb_idle);
 		k_mutex_unlock(&xs_watch_cb_lock);
 	}
+
+	k_mutex_lock(&xs_watch_lock, K_FOREVER);
+	SYS_SLIST_FOR_EACH_CONTAINER(&xs_watchers, watcher, node) {
+		xs_client_watch_cb_t watcher_cb;
+		void *watcher_data;
+
+		if (!xs_watcher_matches(watcher, payload, token)) {
+			continue;
+		}
+
+		watcher_cb = watcher->cb;
+		watcher_data = watcher->user_data;
+		watcher->running = true;
+		k_mutex_unlock(&xs_watch_lock);
+
+		watcher_cb(payload, token, watcher_data);
+
+		k_mutex_lock(&xs_watch_lock, K_FOREVER);
+		watcher->running = false;
+		k_condvar_signal(&xs_watch_idle);
+		break;
+	}
+	k_mutex_unlock(&xs_watch_lock);
 }
 
 /*
@@ -428,46 +633,135 @@ static void xs_handle_watch_event(const char *payload, size_t payload_len)
  *
  * The response ring is one shared incoming byte stream. Application callers do
  * not read it directly; otherwise one caller could consume another caller's
- * reply. This thread reads each message, handles watch events immediately, and
- * routes normal replies to the matching pending request by req_id.
+ * reply. The work item runs when the event channel fires, reads only bytes
+ * already visible in the ring, keeps partial header/payload state between
+ * runs, handles watch events, and routes normal replies by req_id.
  */
-static void xs_rx_thread_fn(void *p1, void *p2, void *p3)
+static int xs_rx_process_one(size_t avail)
 {
-	struct xsd_sockmsg hdr;
+	int rc;
 
-	ARG_UNUSED(p1);
-	ARG_UNUSED(p2);
-	ARG_UNUSED(p3);
+	if (xs_rx_hdr_pos < sizeof(xs_rx_hdr)) {
+		size_t need = sizeof(xs_rx_hdr) - xs_rx_hdr_pos;
+		size_t take = MIN(need, avail);
 
-	while (true) {
+		rc = xs_read_all((uint8_t *)&xs_rx_hdr + xs_rx_hdr_pos, take);
+		if (rc < 0) {
+			return rc;
+		}
+		if (rc == 0) {
+			return -EAGAIN;
+		}
+
+		xs_rx_hdr_pos += (size_t)rc;
+		avail -= (size_t)rc;
+		if (xs_rx_hdr_pos < sizeof(xs_rx_hdr)) {
+			return -EAGAIN;
+		}
+	}
+
+	if (xs_rx_hdr.len > sizeof(xs_rx_payload)) {
+		LOG_ERR("xenstore response payload too large (%u)", xs_rx_hdr.len);
+		if (xs_rx_hdr.type != XS_WATCH_EVENT) {
+			xs_complete_request_error(xs_rx_hdr.req_id, -E2BIG);
+		}
+		xs_rx_frame_discard(xs_rx_hdr.len);
+		return -EMSGSIZE;
+	}
+
+	if (xs_rx_hdr.type != XS_WATCH_EVENT && xs_rx_hdr.req_id == 0) {
+		LOG_ERR("xenstore reply without request id");
+		xs_rx_frame_discard(xs_rx_hdr.len);
+		return -EPROTO;
+	}
+
+	if (xs_rx_hdr.len > xs_rx_payload_pos) {
+		size_t need = xs_rx_hdr.len - xs_rx_payload_pos;
+		size_t take = MIN(need, avail);
+
+		rc = xs_read_all(xs_rx_payload + xs_rx_payload_pos, take);
+		if (rc < 0) {
+			if (xs_rx_hdr.type != XS_WATCH_EVENT) {
+				xs_complete_request_error(xs_rx_hdr.req_id, rc);
+			}
+			return rc;
+		}
+		if (rc == 0) {
+			return -EAGAIN;
+		}
+
+		xs_rx_payload_pos += (size_t)rc;
+		if (xs_rx_payload_pos < xs_rx_hdr.len) {
+			return -EAGAIN;
+		}
+	}
+
+	if (xs_rx_hdr.type == XS_WATCH_EVENT) {
+		xs_handle_watch_event(xs_rx_payload, xs_rx_hdr.len);
+	} else {
+		xs_complete_request(&xs_rx_hdr, xs_rx_payload, xs_rx_hdr.len);
+	}
+	xs_rx_frame_reset();
+
+	return 0;
+}
+
+static void xs_rx_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	while (xs_connected) {
+		size_t avail;
+		size_t take;
 		int rc;
 
-		rc = xs_read_full(&hdr, sizeof(hdr));
-		if (rc < 0) {
-			LOG_ERR("xenstore response header read failed (%d)", rc);
+		rc = xs_rsp_avail(&avail);
+		if (rc < 0 || avail == 0) {
+			if (rc == 0 && xs_has_pending_requests()) {
+				for (int i = 0; i < XS_RING_POLL_SPINS; i++) {
+					k_busy_wait(50);
+					rc = xs_rsp_avail(&avail);
+					if (rc < 0 || avail > 0) {
+						break;
+					}
+				}
+				if (rc == 0 && avail == 0) {
+					k_yield();
+				}
+				if (rc == 0 && avail > 0) {
+					continue;
+				}
+				if (rc == 0 && xs_has_pending_requests()) {
+					xs_rx_submit();
+				}
+			}
+			return;
+		}
+
+		if (xs_rx_discard_len > 0) {
+			take = MIN(xs_rx_discard_len, avail);
+			rc = xs_read_all(NULL, take);
+			if (rc < 0) {
+				return;
+			}
+			if (rc == 0) {
+				return;
+			}
+			xs_rx_discard_len -= (size_t)rc;
+			if (xs_rx_discard_len > 0) {
+				return;
+			}
 			continue;
 		}
 
-		if (hdr.len > sizeof(xs_rx_payload)) {
-			(void)xs_read_full(NULL, hdr.len);
-			xs_complete_request_error(hdr.req_id, -E2BIG);
-			continue;
+		rc = xs_rx_process_one(avail);
+		if (rc == -EAGAIN) {
+			return;
 		}
-
-		rc = xs_read_full(xs_rx_payload, hdr.len);
-		if (rc < 0) {
-			xs_complete_request_error(hdr.req_id, rc);
-			continue;
+		if (rc < 0 && xs_rx_discard_len == 0) {
+			xs_mark_transport_failed(rc);
+			return;
 		}
-
-		if (hdr.type == XS_WATCH_EVENT) {
-			xs_handle_watch_event(xs_rx_payload, hdr.len);
-			k_yield();
-			continue;
-		}
-
-		xs_complete_request(&hdr, xs_rx_payload, hdr.len);
-		k_yield();
 	}
 }
 
@@ -477,18 +771,18 @@ static void xs_rx_thread_fn(void *p1, void *p2, void *p3)
  * The caller takes a pending slot, creates a request ticket, registers it by a
  * fresh req_id, and writes the request header/payload under xs_tx_lock so bytes
  * from concurrent callers cannot interleave. After the write, the caller does
- * not read the response ring; it sleeps on its own ticket until the RX thread
- * completes it or XS_REPLY_TIMEOUT expires.
+ * not read the response ring; it sleeps on its own ticket until RX work
+ * completes it or @timeout expires.
  */
 static int xs_talk(uint32_t type, const void *payload, size_t payload_len,
-		   char *out, size_t out_len)
+		   char *out, size_t out_len, k_timeout_t timeout)
 {
-	struct xs_pending_req *req;
+	struct xs_pending_req req;
 	struct xsd_sockmsg hdr;
 	size_t plen;
 	int rc;
 
-	if (!xs_connected) {
+	if (!xs_client_is_connected()) {
 		return -ENOTCONN;
 	}
 	if (payload_len > XENSTORE_PAYLOAD_MAX) {
@@ -496,79 +790,61 @@ static int xs_talk(uint32_t type, const void *payload, size_t payload_len,
 	}
 
 	k_sem_take(&xs_pending_slots, K_FOREVER);
-	req = k_malloc(sizeof(*req));
-	if (!req) {
-		k_sem_give(&xs_pending_slots);
-		return -ENOMEM;
-	}
-	k_sem_init(&req->done, 0, 1);
-	req->rc = -EIO;
-	req->payload_len = 0;
+	req.node.next = NULL;
+	k_sem_init(&req.done, 0, 1);
+	req.rc = -EIO;
+	req.payload_len = 0;
+	req.out = out;
+	req.out_len = out_len;
 
 	hdr.type = type;
 	hdr.tx_id = 0;
 	hdr.len = (uint32_t)payload_len;
 
 	k_mutex_lock(&xs_pending_lock, K_FOREVER);
-	hdr.req_id = ++xs_req_id;
-	req->req_id = hdr.req_id;
-	sys_slist_append(&xs_pending_reqs, &req->node);
+	hdr.req_id = xs_next_req_id();
+	req.req_id = hdr.req_id;
+	sys_slist_append(&xs_pending_reqs, &req.node);
 	k_mutex_unlock(&xs_pending_lock);
 
 	k_mutex_lock(&xs_tx_lock, K_FOREVER);
-	rc = xs_write_all(&hdr, sizeof(hdr));
+	rc = xs_write_all(&hdr, sizeof(hdr), timeout);
 	if (rc < 0) {
 		k_mutex_unlock(&xs_tx_lock);
-		xs_complete_request_error(req->req_id, rc);
+		xs_complete_request_error(req.req_id, rc);
 		goto wait_done;
 	}
 	if (payload_len) {
-		rc = xs_write_all(payload, payload_len);
+		rc = xs_write_all(payload, payload_len, timeout);
 		if (rc < 0) {
 			k_mutex_unlock(&xs_tx_lock);
-			xs_complete_request_error(req->req_id, rc);
+			xs_complete_request_error(req.req_id, rc);
 			goto wait_done;
 		}
 	}
 	notify_evtchn(xs_evtchn);
+	xs_rx_submit();
 	k_mutex_unlock(&xs_tx_lock);
 
 wait_done:
-	if (k_sem_take(&req->done, XS_REPLY_TIMEOUT) != 0) {
+	if (k_sem_take(&req.done, timeout) != 0) {
 		sys_snode_t *prev = NULL;
 
 		k_mutex_lock(&xs_pending_lock, K_FOREVER);
-		if (xs_find_pending_locked(req->req_id, &prev)) {
-			sys_slist_remove(&xs_pending_reqs, prev, &req->node);
+		if (xs_find_pending_locked(req.req_id, &prev)) {
+			sys_slist_remove(&xs_pending_reqs, prev, &req.node);
 			k_sem_give(&xs_pending_slots);
 		}
 		k_mutex_unlock(&xs_pending_lock);
-		k_free(req);
 		return -ETIMEDOUT;
 	}
 
-	if (req->rc < 0) {
-		rc = req->rc;
-		k_free(req);
+	if (req.rc < 0) {
+		rc = req.rc;
 		return rc;
 	}
 
-	plen = req->payload_len;
-	if (req->hdr.type == XS_ERROR) {
-		int e = xenstore_get_error(req->payload, plen);
-
-		rc = e ? -e : -EIO;
-		k_free(req);
-		return rc;
-	}
-
-	if (out && out_len) {
-		size_t n = plen < out_len ? plen : out_len;
-
-		memcpy(out, req->payload, n);
-	}
-
-	k_free(req);
+	plen = req.payload_len;
 	return (int)plen;
 }
 
@@ -586,7 +862,7 @@ wait_done:
  * small to hold that whole string plus its terminator.
  */
 static int xs_talk_string(uint32_t type, const void *payload, size_t payload_len,
-			  char *out, size_t out_len)
+			  char *out, size_t out_len, k_timeout_t timeout)
 {
 	char *reply;
 	size_t str_len;
@@ -601,7 +877,8 @@ static int xs_talk_string(uint32_t type, const void *payload, size_t payload_len
 		return -ENOMEM;
 	}
 
-	rc = xs_talk(type, payload, payload_len, reply, XENSTORE_PAYLOAD_MAX);
+	rc = xs_talk(type, payload, payload_len, reply, XENSTORE_PAYLOAD_MAX,
+		     timeout);
 	if (rc < 0) {
 		k_free(reply);
 		return rc;
@@ -624,6 +901,12 @@ static int xs_talk_string(uint32_t type, const void *payload, size_t payload_len
 
 int xs_client_write(const char *path, const char *value)
 {
+	return xs_client_write_timeout(path, value, xs_client_get_default_timeout());
+}
+
+int xs_client_write_timeout(const char *path, const char *value,
+			    k_timeout_t timeout)
+{
 	char *buf;
 	size_t pl, vl;
 	int rc;
@@ -645,12 +928,19 @@ int xs_client_write(const char *path, const char *value)
 	memcpy(buf, path, pl);           /* path + NUL */
 	memcpy(buf + pl, value, vl);     /* value (no trailing NUL) */
 
-	rc = xs_talk(XS_WRITE, buf, pl + vl, NULL, 0);
+	rc = xs_talk(XS_WRITE, buf, pl + vl, NULL, 0, timeout);
 	k_free(buf);
 	return rc < 0 ? rc : 0;
 }
 
 int xs_client_read(const char *path, char *out, size_t out_len)
+{
+	return xs_client_read_timeout(path, out, out_len,
+				      xs_client_get_default_timeout());
+}
+
+int xs_client_read_timeout(const char *path, char *out, size_t out_len,
+			   k_timeout_t timeout)
 {
 	int rc;
 
@@ -661,7 +951,7 @@ int xs_client_read(const char *path, char *out, size_t out_len)
 		return -EINVAL;
 	}
 
-	rc = xs_talk(XS_READ, path, strlen(path) + 1, out, out_len);
+	rc = xs_talk(XS_READ, path, strlen(path) + 1, out, out_len, timeout);
 	if (rc < 0) {
 		return rc;
 	}
@@ -676,6 +966,13 @@ int xs_client_read(const char *path, char *out, size_t out_len)
 
 int xs_client_directory(const char *path, char *out, size_t out_len)
 {
+	return xs_client_directory_timeout(path, out, out_len,
+					   xs_client_get_default_timeout());
+}
+
+int xs_client_directory_timeout(const char *path, char *out, size_t out_len,
+				k_timeout_t timeout)
+{
 	int rc;
 
 	if (!path) {
@@ -685,7 +982,8 @@ int xs_client_directory(const char *path, char *out, size_t out_len)
 		return -EINVAL;
 	}
 
-	rc = xs_talk(XS_DIRECTORY, path, strlen(path) + 1, out, out_len);
+	rc = xs_talk(XS_DIRECTORY, path, strlen(path) + 1, out, out_len,
+		     timeout);
 	if (rc < 0) {
 		return rc;
 	}
@@ -698,17 +996,10 @@ int xs_client_directory(const char *path, char *out, size_t out_len)
 
 int xs_client_mkdir(const char *path)
 {
-	int rc;
-
-	if (!path) {
-		return -EINVAL;
-	}
-
-	rc = xs_talk(XS_MKDIR, path, strlen(path) + 1, NULL, 0);
-	return rc < 0 ? rc : 0;
+	return xs_client_mkdir_timeout(path, xs_client_get_default_timeout());
 }
 
-int xs_client_rm(const char *path)
+int xs_client_mkdir_timeout(const char *path, k_timeout_t timeout)
 {
 	int rc;
 
@@ -716,7 +1007,24 @@ int xs_client_rm(const char *path)
 		return -EINVAL;
 	}
 
-	rc = xs_talk(XS_RM, path, strlen(path) + 1, NULL, 0);
+	rc = xs_talk(XS_MKDIR, path, strlen(path) + 1, NULL, 0, timeout);
+	return rc < 0 ? rc : 0;
+}
+
+int xs_client_rm(const char *path)
+{
+	return xs_client_rm_timeout(path, xs_client_get_default_timeout());
+}
+
+int xs_client_rm_timeout(const char *path, k_timeout_t timeout)
+{
+	int rc;
+
+	if (!path) {
+		return -EINVAL;
+	}
+
+	rc = xs_talk(XS_RM, path, strlen(path) + 1, NULL, 0, timeout);
 	return rc < 0 ? rc : 0;
 }
 
@@ -753,6 +1061,13 @@ static int xs_parse_perm_string(const char *str, struct xenstore_perm *perm)
 int xs_client_get_perms(const char *path, struct xenstore_perm *perms,
 			size_t *num_perms)
 {
+	return xs_client_get_perms_timeout(path, perms, num_perms,
+					   xs_client_get_default_timeout());
+}
+
+int xs_client_get_perms_timeout(const char *path, struct xenstore_perm *perms,
+				size_t *num_perms, k_timeout_t timeout)
+{
 	char *payload;
 	size_t off = 0, count = 0, capacity;
 	int rc;
@@ -768,7 +1083,7 @@ int xs_client_get_perms(const char *path, struct xenstore_perm *perms,
 	}
 
 	rc = xs_talk(XS_GET_PERMS, path, strlen(path) + 1, payload,
-		     XENSTORE_PAYLOAD_MAX);
+		     XENSTORE_PAYLOAD_MAX, timeout);
 	if (rc < 0) {
 		k_free(payload);
 		return rc;
@@ -837,6 +1152,14 @@ static int xs_append_perm(char *buf, size_t buf_len, size_t *off,
 int xs_client_set_perms(const char *path, const struct xenstore_perm *perms,
 			size_t num_perms)
 {
+	return xs_client_set_perms_timeout(path, perms, num_perms,
+					   xs_client_get_default_timeout());
+}
+
+int xs_client_set_perms_timeout(const char *path,
+				const struct xenstore_perm *perms,
+				size_t num_perms, k_timeout_t timeout)
+{
 	char *payload;
 	size_t off;
 	int rc;
@@ -863,7 +1186,7 @@ int xs_client_set_perms(const char *path, const struct xenstore_perm *perms,
 		}
 	}
 
-	rc = xs_talk(XS_SET_PERMS, payload, off, NULL, 0);
+	rc = xs_talk(XS_SET_PERMS, payload, off, NULL, 0, timeout);
 	k_free(payload);
 	return rc < 0 ? rc : 0;
 }
@@ -871,12 +1194,83 @@ int xs_client_set_perms(const char *path, const struct xenstore_perm *perms,
 void xs_client_set_watch_callback(xs_client_watch_cb_t cb, void *user_data)
 {
 	k_mutex_lock(&xs_watch_cb_lock, K_FOREVER);
-	while (xs_watch_cb_running && k_current_get() != &xs_rx_thread) {
+	while (xs_watch_cb_running && !xs_in_rx_context()) {
 		k_condvar_wait(&xs_watch_cb_idle, &xs_watch_cb_lock, K_FOREVER);
 	}
 	xs_watch_cb = cb;
 	xs_watch_cb_data = user_data;
 	k_mutex_unlock(&xs_watch_cb_lock);
+}
+
+int xs_client_watcher_register(struct xs_client_watcher *watcher,
+			       const char *path, const char *token,
+			       xs_client_watch_cb_t cb, void *user_data)
+{
+	int rc;
+
+	if (!watcher || !path || !token || !cb) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&xs_watch_lock, K_FOREVER);
+	if (watcher->active || watcher->running) {
+		k_mutex_unlock(&xs_watch_lock);
+		return -EALREADY;
+	}
+
+	watcher->path = path;
+	watcher->token = token;
+	watcher->cb = cb;
+	watcher->user_data = user_data;
+	watcher->active = true;
+	watcher->running = false;
+	sys_slist_append(&xs_watchers, &watcher->node);
+	k_mutex_unlock(&xs_watch_lock);
+
+	rc = xs_client_watch(path, token);
+	if (rc) {
+		k_mutex_lock(&xs_watch_lock, K_FOREVER);
+		if (watcher->active) {
+			(void)sys_slist_find_and_remove(&xs_watchers, &watcher->node);
+			watcher->active = false;
+		}
+		k_mutex_unlock(&xs_watch_lock);
+	}
+
+	return rc;
+}
+
+int xs_client_watcher_unregister(struct xs_client_watcher *watcher)
+{
+	const char *path;
+	const char *token;
+	bool from_rx = xs_in_rx_context();
+
+	if (!watcher) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&xs_watch_lock, K_FOREVER);
+	if (!watcher->active) {
+		k_mutex_unlock(&xs_watch_lock);
+		return -ENOENT;
+	}
+	if (from_rx && watcher->running) {
+		k_mutex_unlock(&xs_watch_lock);
+		return -EWOULDBLOCK;
+	}
+
+	while (watcher->running) {
+		k_condvar_wait(&xs_watch_idle, &xs_watch_lock, K_FOREVER);
+	}
+
+	path = watcher->path;
+	token = watcher->token;
+	(void)sys_slist_find_and_remove(&xs_watchers, &watcher->node);
+	watcher->active = false;
+	k_mutex_unlock(&xs_watch_lock);
+
+	return xs_client_unwatch(path, token);
 }
 
 /*
@@ -887,7 +1281,8 @@ void xs_client_set_watch_callback(xs_client_watch_cb_t cb, void *user_data)
  * (`path\0token\0`). @type selects whether the server should add or remove
  * that watch entry.
  */
-static int xs_watch_op(uint32_t type, const char *path, const char *token)
+static int xs_watch_op(uint32_t type, const char *path, const char *token,
+		       k_timeout_t timeout)
 {
 	char *payload;
 	const char *strings[] = { path, token };
@@ -910,29 +1305,55 @@ static int xs_watch_op(uint32_t type, const char *path, const char *token)
 		return rc;
 	}
 
-	rc = xs_talk(type, payload, payload_len, NULL, 0);
+	rc = xs_talk(type, payload, payload_len, NULL, 0, timeout);
 	k_free(payload);
 	return rc < 0 ? rc : 0;
 }
 
 int xs_client_watch(const char *path, const char *token)
 {
-	return xs_watch_op(XS_WATCH, path, token);
+	return xs_client_watch_timeout(path, token,
+				       xs_client_get_default_timeout());
+}
+
+int xs_client_watch_timeout(const char *path, const char *token,
+			    k_timeout_t timeout)
+{
+	return xs_watch_op(XS_WATCH, path, token, timeout);
 }
 
 int xs_client_unwatch(const char *path, const char *token)
 {
-	return xs_watch_op(XS_UNWATCH, path, token);
+	return xs_client_unwatch_timeout(path, token,
+					 xs_client_get_default_timeout());
+}
+
+int xs_client_unwatch_timeout(const char *path, const char *token,
+			      k_timeout_t timeout)
+{
+	return xs_watch_op(XS_UNWATCH, path, token, timeout);
 }
 
 int xs_client_reset_watches(void)
 {
-	int rc = xs_talk(XS_RESET_WATCHES, NULL, 0, NULL, 0);
+	return xs_client_reset_watches_timeout(xs_client_get_default_timeout());
+}
+
+int xs_client_reset_watches_timeout(k_timeout_t timeout)
+{
+	int rc = xs_talk(XS_RESET_WATCHES, NULL, 0, NULL, 0, timeout);
 
 	return rc < 0 ? rc : 0;
 }
 
 int xs_client_get_domain_path(domid_t domid, char *out, size_t out_len)
+{
+	return xs_client_get_domain_path_timeout(domid, out, out_len,
+						 xs_client_get_default_timeout());
+}
+
+int xs_client_get_domain_path_timeout(domid_t domid, char *out, size_t out_len,
+				      k_timeout_t timeout)
 {
 	char payload[16];
 	int len;
@@ -943,7 +1364,7 @@ int xs_client_get_domain_path(domid_t domid, char *out, size_t out_len)
 	}
 
 	return xs_talk_string(XS_GET_DOMAIN_PATH, payload, (size_t)len, out,
-			      out_len);
+			      out_len, timeout);
 }
 
 #ifdef CONFIG_XEN_STORE_CLIENT_AUTO_CONNECT
