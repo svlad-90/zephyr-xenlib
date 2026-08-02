@@ -1,0 +1,113 @@
+/*
+ * Copyright (c) 2026 EPAM Systems
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef XENLIB_XEN_BLKFRONT_H
+#define XENLIB_XEN_BLKFRONT_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include <zephyr/kernel.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define XEN_BLKFRONT_SECTOR_SIZE 512U
+
+struct xen_blkfront;
+
+/**
+ * @brief Xen PV block frontend connection parameters.
+ */
+struct xen_blkfront_config {
+	/** XenStore frontend device path, for example "/local/domain/1/device/vbd/51712". */
+	const char *frontend_path;
+	/** XenStore backend device path, for example "/local/domain/0/backend/vbd/1/51712". */
+	const char *backend_path;
+	/** Virtual block-device handle assigned by the toolstack. */
+	uint16_t vdev;
+	/** Domain id of the blkback backend. Dom0 is normally 0. */
+	uint16_t backend_domid;
+	/** Timeout for one XenStore request issued by this frontend. */
+	k_timeout_t xs_timeout;
+	/** XenStore read attempts while waiting for backend-created nodes and state. */
+	uint16_t backend_wait_attempts;
+	/** Delay between backend wait attempts. */
+	k_timeout_t backend_retry_delay;
+};
+
+/**
+ * @brief Open and connect a Xen PV block frontend.
+ *
+ * The returned handle is owned by the caller and must be closed with
+ * xen_blkfront_close(). This minimal frontend supports one outstanding block
+ * request at a time. If a submitted request times out or its completion state
+ * becomes ambiguous, the handle enters a failed state: later reads fail until
+ * the caller closes the handle.
+ *
+ * @param cfg         Connection parameters.
+ * @param front       Output handle.
+ * @param xs_buf      Caller-provided temporary XenStore response buffer. This
+ *                    must be valid when closing a frontend that reached
+ *                    XenStore publication.
+ * @param xs_buf_len  Size of @p xs_buf.
+ *
+ * @retval 0       Frontend connected to blkback.
+ * @retval -errno  Failed to connect.
+ */
+int xen_blkfront_open(const struct xen_blkfront_config *cfg, struct xen_blkfront **front,
+		      char *xs_buf, size_t xs_buf_len);
+
+/**
+ * @brief Read one or more sectors into a caller buffer.
+ *
+ * @param front   Open frontend handle.
+ * @param sector  First 512-byte sector to read.
+ * @param data    Destination buffer.
+ * @param len     Number of bytes to read; must be a non-zero multiple of 512
+ *                and no larger than one Xen page.
+ *
+ * @retval 0       Read completed successfully.
+ * @retval -ERANGE Requested sector range is outside the backend capacity.
+ * @retval -errno  Failed to submit or complete the request.
+ */
+int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, size_t len);
+
+/**
+ * @brief Return the sector count advertised by the backend.
+ *
+ * @param front Open frontend handle.
+ *
+ * @return Number of 512-byte sectors, or 0 for an invalid handle.
+ */
+uint64_t xen_blkfront_sectors(const struct xen_blkfront *front);
+
+/**
+ * @brief Disconnect and destroy a Xen PV block frontend.
+ *
+ * The caller must not use @p front after this function returns, and must not
+ * call this function concurrently with another API operating on the same
+ * handle.
+ *
+ * @param front       Open frontend handle. NULL is accepted.
+ * @param xs_buf      Caller-provided temporary XenStore response buffer.
+ * @param xs_buf_len  Size of @p xs_buf.
+ *
+ * @retval 0       Frontend was disconnected or @p front was NULL.
+ * @retval -EINVAL @p front reached XenStore publication, but @p xs_buf is NULL
+ *                 or @p xs_buf_len is zero. The handle remains open so the
+ *                 caller can retry with a valid buffer.
+ * @retval -errno  Frontend resources were released, but the XenBus shutdown
+ *                 handshake did not complete cleanly.
+ */
+int xen_blkfront_close(struct xen_blkfront *front, char *xs_buf, size_t xs_buf_len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* XENLIB_XEN_BLKFRONT_H */
