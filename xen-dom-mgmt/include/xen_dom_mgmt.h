@@ -30,6 +30,22 @@ extern "C" {
 int domain_create(struct xen_domain_cfg *domcfg, uint32_t domid);
 
 /**
+ * Hook called after domain resources are initialized, but before
+ * domain_create() unpauses the domain vCPU.
+ *
+ * The weak default implementation does nothing. Validation products and other
+ * integrators can override it to attach early observers, such as a DomU console
+ * feed callback, before the guest can produce output.
+ *
+ * The domain pointer is valid for the duration of the call. Users that need to
+ * retain a domain reference should use the normal domain lookup APIs after
+ * domain_create() succeeds.
+ *
+ * @param domain The domain being created.
+ */
+void domain_pre_unpause(struct xen_domain *domain);
+
+/**
  * Destroys the specified domain.
  *
  * @param domid The ID of the domain to destroy.

@@ -52,6 +52,11 @@ static sys_dlist_t domain_list = SYS_DLIST_STATIC_INIT(&domain_list);
 K_MUTEX_DEFINE(dl_mutex);
 K_MUTEX_DEFINE(create_mutex);
 
+__weak void domain_pre_unpause(struct xen_domain *domain)
+{
+	ARG_UNUSED(domain);
+}
+
 static void arch_prepare_domain_cfg(struct xen_domain_cfg *dom_cfg,
 				    struct xen_arch_domainconfig *arch_cfg)
 {
@@ -858,6 +863,8 @@ int domain_create(struct xen_domain_cfg *domcfg, uint32_t domid)
 	if (rc) {
 		goto stop_domain_console;
 	}
+
+	domain_pre_unpause(domain);
 
 	if (!domcfg->f_paused) {
 		rc = xen_domctl_unpausedomain(domid);

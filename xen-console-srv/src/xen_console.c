@@ -35,6 +35,7 @@ LOG_MODULE_REGISTER(xen_domain_console);
 #define XEN_CONSOLE_PRIO		14
 #define EXT_THREAD_STOP_BIT		0
 #define INT_THREAD_STOP_BIT		1
+#define XEN_CONSOLE_POLL_INTERVAL_MS	20
 
 /* Size is chosen based on educated guess. It should be power of two. */
 #define XEN_CONSOLE_BUFFER_SZ		8192
@@ -111,6 +112,20 @@ static void console_feed_int_ring(struct xen_domain_console *console, char ch)
 	}
 }
 
+static void console_replay_int_ring(struct xen_domain_console *console,
+				    on_console_feed_cb_t cb, void *cb_data)
+{
+	size_t cons = console->int_cons;
+	size_t prod = console->int_prod;
+
+	while (cons < prod) {
+		size_t buf_pos = cons & (XEN_CONSOLE_BUFFER_SZ - 1);
+
+		cb(console->int_buf[buf_pos], cb_data);
+		cons++;
+	}
+}
+
 #ifdef CONFIG_XEN_SHELL
 /* Write data to DomU
  * Please note that ring buffers named in accordance to DomU point of view:
@@ -164,9 +179,12 @@ static int read_from_ext_ring(struct xencons_interface *intf,
 
 	z_barrier_dsync_fence_full();		/* Read counters, then data */
 	if ((prod - cons) > sizeof(intf->out)) {
-		LOG_WRN("Invalid state of console output ring. Resetting.");
-		intf->out_cons = prod;
-		return 0;
+		size_t lost = (prod - cons) - sizeof(intf->out);
+
+		LOG_WRN("Domain console output overrun detected. %zi bytes were lost",
+			lost);
+		console->lost_chars += lost;
+		cons = prod - sizeof(intf->out);
 	}
 
 	while (cons != prod) {
@@ -190,7 +208,8 @@ static void console_read_thrd(void *con, void *p2, void *p3)
 
 	while (!atomic_test_and_clear_bit(&console->stop_thrd,
 					  EXT_THREAD_STOP_BIT)) {
-		k_sem_take(&console->ext_sem, K_FOREVER);
+		k_sem_take(&console->ext_sem,
+			   K_MSEC(XEN_CONSOLE_POLL_INTERVAL_MS));
 		/* Need to call read_from_ext_ring() till there are no
 		 * data to read, because there can be race between us
 		 * and writer in DomU
@@ -532,6 +551,12 @@ int set_console_feed_cb(struct xen_domain *domain, on_console_feed_cb_t cb, void
 
 	console->on_feed_cb = cb;
 	console->on_feed_cb_data = cb_data;
+	if (cb != NULL) {
+		console_replay_int_ring(console, cb, cb_data);
+		while (read_from_ext_ring(console->intf, console)) {
+			;
+		}
+	}
 
 	k_mutex_unlock(&console->lock);
 
