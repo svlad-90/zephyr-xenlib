@@ -38,6 +38,8 @@ LOG_MODULE_REGISTER(xenstore_cli);
 #define XS_SET_PERMS_MAX_ENTRIES 32
 /* Longest supported wire permission string: one access char plus 10 digit domid plus NUL. */
 #define XS_PERM_WIRE_ENTRY_MAX   12
+/* Longest XenStore error name, including its trailing NUL. */
+#define XS_ERROR_WIRE_MAX        sizeof("ENOTEMPTY")
 /* Soft retry used to catch replies when no extra event interrupt arrives. */
 #define XS_RING_RETRY_DELAY      K_MSEC(10)
 /* Bounded set of already-submitted request ids whose caller timed out locally. */
@@ -1496,7 +1498,7 @@ int xs_init(void)
 		goto out;
 	}
 
-	device_map(&vaddr, XEN_PFN_PHYS(paddr), XEN_PAGE_SIZE, K_MEM_CACHE_NONE | K_MEM_PERM_RW);
+	device_map(&vaddr, XEN_PFN_PHYS(paddr), XEN_PAGE_SIZE, K_MEM_CACHE_WB | K_MEM_PERM_RW);
 	if (vaddr == 0) {
 		LOG_ERR("device_map failed.");
 		err = -EIO;
@@ -1796,7 +1798,7 @@ ssize_t xs_write(const char *path, const char *value, size_t value_len, char *bu
 int xs_set_permissions_timeout(const char *path, const struct xs_permission_entry *perms,
 			       size_t perms_num, uint32_t tx_id, k_timeout_t tout)
 {
-	char response[XENSTORE_PAYLOAD_MAX + 1];
+	char response[XS_ERROR_WIRE_MAX];
 	ssize_t ret;
 
 	if (!path) {
