@@ -43,10 +43,19 @@ static int make_path(char *dst, size_t dst_len, const char *base, const char *no
 	return 0;
 }
 
+static bool is_decimal_digit(char c)
+{
+	return (c >= '0') && (c <= '9');
+}
+
 static int parse_u64(const char *value, uint64_t *result)
 {
 	char *end;
 	unsigned long long parsed;
+
+	if (!is_decimal_digit(value[0])) {
+		return -EINVAL;
+	}
 
 	errno = 0;
 	parsed = strtoull(value, &end, 10);

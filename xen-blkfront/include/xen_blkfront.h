@@ -83,10 +83,16 @@ struct xen_blkfront_config {
  * @brief Open and connect a Xen PV block frontend.
  *
  * The returned handle is owned by the caller and must be closed with
- * xen_blkfront_close(). This minimal frontend supports one outstanding block
- * request at a time. If a submitted request times out or its completion state
- * becomes ambiguous, the handle enters a failed state: later reads fail until
- * the caller closes the handle.
+ * xen_blkfront_close(). This frontend supports one outstanding block request
+ * at a time. Public read and write calls may cover more than one Xen page, but
+ * the backend-facing protocol path still uses one data grant page per request
+ * and splits larger transfers internally. The current implementation discovers
+ * indirect, persistent-grant, and multi-queue backend capabilities so callers
+ * can inspect them, but it does not use those features for request submission.
+ *
+ * If a submitted request times out or its completion state becomes ambiguous,
+ * the handle enters a failed state: later data, flush, and discard operations
+ * fail until the caller closes the handle.
  *
  * @param cfg         Connection parameters.
  * @param front       Output handle.
@@ -112,6 +118,7 @@ int xen_blkfront_open(const struct xen_blkfront_config *cfg, struct xen_blkfront
  *                block protocol requests internally.
  *
  * @retval 0       Read completed successfully.
+ * @retval -EINVAL Invalid handle, buffer, or length.
  * @retval -ERANGE Requested sector range is outside the backend capacity.
  * @retval -errno  Failed to submit or complete the request.
  */
@@ -128,7 +135,9 @@ int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, s
  *                block protocol requests internally.
  *
  * @retval 0       Write completed successfully.
+ * @retval -EINVAL Invalid handle, buffer, or length.
  * @retval -ERANGE Requested sector range is outside the backend capacity.
+ * @retval -EROFS  Backend is read-only.
  * @retval -errno  Failed to submit or complete the request.
  */
 int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *data,
@@ -140,6 +149,7 @@ int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *
  * @param front Open frontend handle.
  *
  * @retval 0        Flush request completed successfully.
+ * @retval -EINVAL  Invalid handle.
  * @retval -ENOTSUP Backend did not advertise flush support or rejected the request.
  * @retval -errno   Failed to submit or complete the request.
  */

@@ -57,9 +57,13 @@ config XEN_BLKFRONT
 	depends on XEN_GRANT_TABLE
 	depends on XEN_EVENTS
 	help
-	  Enable a minimal Xen paravirtual block frontend. The current API
-	  connects one virtual block device through XenStore, discovers selected
-	  backend capabilities, and supports serialized read/write requests.
+	  Enable a Xen paravirtual block frontend. The current API connects one
+	  virtual block device through XenStore, discovers backend capabilities,
+	  and supports serialized read, write, flush, and discard requests.
+	  Public read and write calls may cover more than one Xen page, but the
+	  backend-facing protocol path splits them into one data grant page per
+	  request. Indirect descriptors, persistent grants, and multiple queues
+	  are discovered but not used for request submission.
 
 if XEN_BLKFRONT
 
@@ -68,7 +72,8 @@ config XEN_BLKFRONT_DISK_ACCESS
 	depends on DISK_ACCESS
 	help
 	  Register one Xen PV block frontend as a Zephyr disk_access disk. This
-	  adapter supports read/write when the backend advertises write access.
+	  adapter supports read/write, cache sync, and physical erase when the
+	  backend advertises the corresponding write, flush, and discard support.
 
 config XEN_BLKFRONT_DISK_NAME
 	string "Xen PV block disk name"
