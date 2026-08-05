@@ -154,18 +154,14 @@ static int blkfront_disk_erase(struct disk_info *disk, uint32_t start_sector,
 
 static int blkfront_disk_deinit(struct xen_blkfront_disk *ctx)
 {
-	int ret;
+	struct xen_blkfront *front = ctx->front;
 
-	if (ctx->front == NULL) {
+	if (front == NULL) {
 		return 0;
 	}
 
-	ret = xen_blkfront_close(ctx->front, ctx->xs_buf, sizeof(ctx->xs_buf));
-	if (ret == 0) {
-		ctx->front = NULL;
-	}
-
-	return ret;
+	ctx->front = NULL;
+	return xen_blkfront_close(front, ctx->xs_buf, sizeof(ctx->xs_buf));
 }
 
 static int blkfront_disk_ioctl(struct disk_info *disk, uint8_t cmd, void *buff)
