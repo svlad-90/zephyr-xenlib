@@ -7,6 +7,7 @@
 #ifndef XENLIB_XEN_BLKFRONT_H
 #define XENLIB_XEN_BLKFRONT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -19,6 +20,44 @@ extern "C" {
 #define XEN_BLKFRONT_SECTOR_SIZE 512U
 
 struct xen_blkfront;
+
+/**
+ * @brief Xen PV block backend capabilities discovered from XenStore.
+ */
+struct xen_blkfront_info {
+	/** Backend capacity in 512-byte sectors. */
+	uint64_t sectors;
+	/** Backend logical sector size in bytes. */
+	uint32_t sector_size;
+	/** Backend physical sector size in bytes. */
+	uint32_t physical_sector_size;
+	/** Backend device information bitmap, using VDISK_* bits from blkif.h. */
+	uint32_t info;
+	/** Maximum backend request ring order, where 0 means one ring page. */
+	uint32_t max_ring_page_order;
+	/** Maximum backend request ring pages. */
+	uint32_t max_ring_pages;
+	/** Maximum backend queues advertised through multi-queue-max-queues. */
+	uint32_t multi_queue_max_queues;
+	/** Maximum indirect request segments, or 0 when indirect requests are absent. */
+	uint32_t max_indirect_segments;
+	/** Discard alignment in bytes. */
+	uint32_t discard_alignment;
+	/** Discard granularity in bytes. */
+	uint32_t discard_granularity;
+	/** Backend accepted write requests at discovery time. */
+	bool writable;
+	/** Backend advertises BLKIF_OP_WRITE_BARRIER support. */
+	bool feature_barrier;
+	/** Backend advertises BLKIF_OP_FLUSH_DISKCACHE support. */
+	bool feature_flush_cache;
+	/** Backend advertises BLKIF_OP_DISCARD support. */
+	bool feature_discard;
+	/** Backend advertises secure discard support. */
+	bool discard_secure;
+	/** Backend advertises persistent grant support. */
+	bool feature_persistent;
+};
 
 /**
  * @brief Xen PV block frontend connection parameters.
@@ -78,6 +117,33 @@ int xen_blkfront_open(const struct xen_blkfront_config *cfg, struct xen_blkfront
 int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, size_t len);
 
 /**
+ * @brief Write one or more sectors from a caller buffer.
+ *
+ * @param front   Open frontend handle.
+ * @param sector  First 512-byte sector to write.
+ * @param data    Source buffer.
+ * @param len     Number of bytes to write; must be a non-zero multiple of 512
+ *                and no larger than one Xen page.
+ *
+ * @retval 0       Write completed successfully.
+ * @retval -ERANGE Requested sector range is outside the backend capacity.
+ * @retval -errno  Failed to submit or complete the request.
+ */
+int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *data,
+		       size_t len);
+
+/**
+ * @brief Commit backend volatile write cache to stable storage.
+ *
+ * @param front Open frontend handle.
+ *
+ * @retval 0        Flush request completed successfully.
+ * @retval -ENOTSUP Backend did not advertise flush support or rejected the request.
+ * @retval -errno   Failed to submit or complete the request.
+ */
+int xen_blkfront_flush(struct xen_blkfront *front);
+
+/**
  * @brief Return the sector count advertised by the backend.
  *
  * @param front Open frontend handle.
@@ -85,6 +151,17 @@ int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, s
  * @return Number of 512-byte sectors, or 0 for an invalid handle.
  */
 uint64_t xen_blkfront_sectors(const struct xen_blkfront *front);
+
+/**
+ * @brief Copy backend capabilities discovered during xen_blkfront_open().
+ *
+ * @param front Open frontend handle.
+ * @param info  Output capability structure.
+ *
+ * @retval 0       Capabilities copied.
+ * @retval -EINVAL Invalid handle or output pointer.
+ */
+int xen_blkfront_get_info(const struct xen_blkfront *front, struct xen_blkfront_info *info);
 
 /**
  * @brief Disconnect and destroy a Xen PV block frontend.

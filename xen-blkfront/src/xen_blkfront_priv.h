@@ -64,7 +64,7 @@ struct xen_blkfront {
 	struct xen_blkfront_data_page deferred_data;
 	k_timeout_t xs_timeout;
 	k_timeout_t backend_retry_delay;
-	uint64_t sectors;
+	struct xen_blkfront_info info;
 	uint64_t next_req_id;
 	uint16_t vdev;
 	uint16_t backend_domid;
@@ -85,8 +85,8 @@ int xen_blkfront_xenbus_publish_frontend(struct xen_blkfront *front, char *buf, 
 					 k_timeout_t timeout);
 int xen_blkfront_xenbus_wait_connected(struct xen_blkfront *front, char *buf, size_t len,
 				       uint16_t attempts, k_timeout_t retry_delay);
-int xen_blkfront_xenbus_read_capacity(struct xen_blkfront *front, char *buf, size_t len,
-				      k_timeout_t timeout);
+int xen_blkfront_xenbus_discover(struct xen_blkfront *front, char *buf, size_t len,
+				 k_timeout_t timeout);
 int xen_blkfront_xenbus_close(struct xen_blkfront *front, char *buf, size_t len);
 
 int xen_blkfront_transport_connect(struct xen_blkfront *front);
@@ -95,10 +95,14 @@ int xen_blkfront_transport_alloc_data_page(struct xen_blkfront_data_page *data);
 void xen_blkfront_transport_free_data_page(struct xen_blkfront_data_page *data);
 
 void xen_blkfront_ring_init(struct xen_blkfront *front);
-int xen_blkfront_ring_read(struct xen_blkfront *front, grant_ref_t data_gref, uint64_t sector,
-			   size_t len, uint64_t req_id, bool *request_open);
+int xen_blkfront_ring_request(struct xen_blkfront *front, grant_ref_t data_gref, uint64_t sector,
+			      size_t len, uint64_t req_id, uint8_t operation,
+			      bool *request_open);
 
 int xen_blkfront_queue_read(struct xen_blkfront *front, uint64_t sector, void *data, size_t len);
+int xen_blkfront_queue_write(struct xen_blkfront *front, uint64_t sector, const void *data,
+			     size_t len);
+int xen_blkfront_queue_flush(struct xen_blkfront *front);
 void xen_blkfront_queue_release_deferred(struct xen_blkfront *front);
 
 #endif /* XENLIB_XEN_BLKFRONT_PRIV_H */

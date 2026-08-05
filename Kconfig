@@ -58,9 +58,56 @@ config XEN_BLKFRONT
 	depends on XEN_EVENTS
 	help
 	  Enable a minimal Xen paravirtual block frontend. The current API
-	  connects one virtual block device through XenStore and supports a
-	  single outstanding read request, which is enough for integration and
-	  transport validation against a Xen blkback backend.
+	  connects one virtual block device through XenStore, discovers selected
+	  backend capabilities, and supports serialized read/write requests.
+
+if XEN_BLKFRONT
+
+config XEN_BLKFRONT_DISK_ACCESS
+	bool "Expose Xen PV block frontend as a Zephyr disk"
+	depends on DISK_ACCESS
+	help
+	  Register one Xen PV block frontend as a Zephyr disk_access disk. This
+	  adapter supports read/write when the backend advertises write access.
+
+config XEN_BLKFRONT_DISK_NAME
+	string "Xen PV block disk name"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default "XENBLK0"
+	help
+	  Name used by disk_access APIs, for example disk_access_read("XENBLK0", ...).
+
+config XEN_BLKFRONT_FRONTEND_PATH
+	string "XenStore frontend path"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default "/local/domain/1/device/vbd/51712"
+
+config XEN_BLKFRONT_BACKEND_PATH
+	string "XenStore backend path"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default "/local/domain/0/backend/vbd/1/51712"
+
+config XEN_BLKFRONT_VDEV
+	int "Xen PV block virtual device id"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 51712
+
+config XEN_BLKFRONT_BACKEND_DOMID
+	int "Xen PV block backend domain id"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 0
+
+config XEN_BLKFRONT_XS_TIMEOUT_MS
+	int "Xen PV block XenStore request timeout in milliseconds"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 1000
+
+config XEN_BLKFRONT_XS_BUF_SIZE
+	int "Xen PV block XenStore temporary buffer size"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 512
+
+endif # XEN_BLKFRONT
 
 config XEN_LIBFDT
 	bool "Enable libfdt support"

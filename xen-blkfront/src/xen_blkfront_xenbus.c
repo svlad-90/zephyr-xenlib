@@ -58,6 +58,24 @@ static int parse_u64(const char *value, uint64_t *result)
 	return 0;
 }
 
+static int parse_u32(const char *value, uint32_t *result)
+{
+	uint64_t parsed;
+	int ret;
+
+	ret = parse_u64(value, &parsed);
+	if (ret != 0) {
+		return ret;
+	}
+
+	if (parsed > UINT32_MAX) {
+		return -ERANGE;
+	}
+
+	*result = (uint32_t)parsed;
+	return 0;
+}
+
 static int read_string(const char *path, char *buf, size_t len, k_timeout_t timeout)
 {
 	ssize_t ret;
@@ -73,6 +91,83 @@ static int read_string(const char *path, char *buf, size_t len, k_timeout_t time
 
 	buf[ret] = '\0';
 	return 0;
+}
+
+static int read_backend_string(struct xen_blkfront *front, const char *node, char *buf,
+			       size_t len, k_timeout_t timeout)
+{
+	char path[XEN_BLKFRONT_PATH_MAX];
+	int ret;
+
+	ret = make_path(path, sizeof(path), front->backend_path, node);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return read_string(path, buf, len, timeout);
+}
+
+static int read_backend_u32(struct xen_blkfront *front, const char *node, char *buf,
+			    size_t len, k_timeout_t timeout, uint32_t *value)
+{
+	int ret;
+
+	ret = read_backend_string(front, node, buf, len, timeout);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return parse_u32(buf, value);
+}
+
+static int read_backend_u64(struct xen_blkfront *front, const char *node, char *buf,
+			    size_t len, k_timeout_t timeout, uint64_t *value)
+{
+	int ret;
+
+	ret = read_backend_string(front, node, buf, len, timeout);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return parse_u64(buf, value);
+}
+
+static int read_backend_bool_default(struct xen_blkfront *front, const char *node, char *buf,
+				     size_t len, k_timeout_t timeout, bool default_value,
+				     bool *value)
+{
+	uint32_t parsed;
+	int ret;
+
+	ret = read_backend_string(front, node, buf, len, timeout);
+	if (ret != 0) {
+		*value = default_value;
+		return 0;
+	}
+
+	ret = parse_u32(buf, &parsed);
+	if (ret != 0) {
+		return ret;
+	}
+
+	*value = (parsed != 0U);
+	return 0;
+}
+
+static int read_backend_u32_default(struct xen_blkfront *front, const char *node, char *buf,
+				    size_t len, k_timeout_t timeout, uint32_t default_value,
+				    uint32_t *value)
+{
+	int ret;
+
+	ret = read_backend_string(front, node, buf, len, timeout);
+	if (ret != 0) {
+		*value = default_value;
+		return 0;
+	}
+
+	return parse_u32(buf, value);
 }
 
 static int write_string(const char *path, const char *value, char *buf, size_t len,
@@ -177,16 +272,13 @@ int xen_blkfront_xenbus_wait_backend_path(struct xen_blkfront *front, char *buf,
 int xen_blkfront_xenbus_verify_vdev(struct xen_blkfront *front, char *buf, size_t len,
 				    k_timeout_t timeout)
 {
-	char path[XEN_BLKFRONT_PATH_MAX];
 	uint64_t vdev;
 	int ret;
 
-	ret = make_path(path, sizeof(path), front->frontend_path, "virtual-device");
-	if (ret != 0) {
-		return ret;
-	}
+	ARG_UNUSED(timeout);
 
-	ret = read_string(path, buf, len, timeout);
+	ret = wait_front_node(front, "virtual-device", buf, len, front->backend_wait_attempts,
+			      front->backend_retry_delay);
 	if (ret != 0) {
 		return ret;
 	}
@@ -300,23 +392,129 @@ static int wait_backend_state(struct xen_blkfront *front, char *buf, size_t len,
 	return -ETIMEDOUT;
 }
 
-int xen_blkfront_xenbus_read_capacity(struct xen_blkfront *front, char *buf, size_t len,
-				      k_timeout_t timeout)
+static int discover_backend_mode(struct xen_blkfront *front, char *buf, size_t len,
+				 k_timeout_t timeout)
 {
-	char path[XEN_BLKFRONT_PATH_MAX];
 	int ret;
 
-	ret = make_path(path, sizeof(path), front->backend_path, "sectors");
+	ret = read_backend_string(front, "mode", buf, len, timeout);
+	if (ret != 0) {
+		front->info.writable = false;
+		return 0;
+	}
+
+	if (strcmp(buf, "w") == 0) {
+		front->info.writable = true;
+		return 0;
+	}
+
+	if (strcmp(buf, "r") == 0) {
+		front->info.writable = false;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+int xen_blkfront_xenbus_discover(struct xen_blkfront *front, char *buf, size_t len,
+				 k_timeout_t timeout)
+{
+	int ret;
+
+	ret = read_backend_u64(front, "sectors", buf, len, timeout, &front->info.sectors);
 	if (ret != 0) {
 		return ret;
 	}
 
-	ret = read_string(path, buf, len, timeout);
+	ret = discover_backend_mode(front, buf, len, timeout);
 	if (ret != 0) {
 		return ret;
 	}
 
-	return parse_u64(buf, &front->sectors);
+	ret = read_backend_u32(front, "info", buf, len, timeout, &front->info.info);
+	if (ret == 0) {
+		front->info.writable = front->info.writable &&
+				       ((front->info.info & VDISK_READONLY) == 0U);
+	} else {
+		front->info.info = front->info.writable ? 0U : VDISK_READONLY;
+	}
+
+	ret = read_backend_u32_default(front, "sector-size", buf, len, timeout,
+				       XEN_BLKFRONT_SECTOR_SIZE, &front->info.sector_size);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_u32_default(front, "physical-sector-size", buf, len, timeout,
+				       front->info.sector_size,
+				       &front->info.physical_sector_size);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_bool_default(front, "feature-barrier", buf, len, timeout, false,
+					&front->info.feature_barrier);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_bool_default(front, "feature-flush-cache", buf, len, timeout, false,
+					&front->info.feature_flush_cache);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_bool_default(front, "feature-discard", buf, len, timeout, false,
+					&front->info.feature_discard);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_bool_default(front, "discard-secure", buf, len, timeout, false,
+					&front->info.discard_secure);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_bool_default(front, "feature-persistent", buf, len, timeout, false,
+					&front->info.feature_persistent);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_u32_default(front, "max-ring-page-order", buf, len, timeout, 0U,
+				       &front->info.max_ring_page_order);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_u32_default(front, "max-ring-pages", buf, len, timeout, 1U,
+				       &front->info.max_ring_pages);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_u32_default(front, "multi-queue-max-queues", buf, len, timeout, 0U,
+				       &front->info.multi_queue_max_queues);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_u32_default(front, "feature-max-indirect-segments", buf, len,
+				       timeout, 0U, &front->info.max_indirect_segments);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = read_backend_u32_default(front, "discard-alignment", buf, len, timeout, 0U,
+				       &front->info.discard_alignment);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return read_backend_u32_default(front, "discard-granularity", buf, len, timeout,
+					front->info.sector_size,
+					&front->info.discard_granularity);
 }
 
 int xen_blkfront_xenbus_close(struct xen_blkfront *front, char *buf, size_t len)

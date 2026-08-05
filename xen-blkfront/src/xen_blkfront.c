@@ -97,7 +97,7 @@ int xen_blkfront_open(const struct xen_blkfront_config *cfg, struct xen_blkfront
 		goto fail;
 	}
 
-	ret = xen_blkfront_xenbus_read_capacity(front, xs_buf, xs_buf_len, cfg->xs_timeout);
+	ret = xen_blkfront_xenbus_discover(front, xs_buf, xs_buf_len, cfg->xs_timeout);
 	if (ret != 0) {
 		goto fail;
 	}
@@ -121,17 +121,62 @@ int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, s
 	}
 
 	sector_count = len / XEN_BLKFRONT_SECTOR_SIZE;
-	if ((front->sectors == 0U) || (sector >= front->sectors) ||
-	    (sector_count > (front->sectors - sector))) {
+	if ((front->info.sectors == 0U) || (sector >= front->info.sectors) ||
+	    (sector_count > (front->info.sectors - sector))) {
 		return -ERANGE;
 	}
 
 	return xen_blkfront_queue_read(front, sector, data, len);
 }
 
+int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *data, size_t len)
+{
+	uint64_t sector_count;
+
+	if ((front == NULL) || (data == NULL) || (len == 0) || (len > XEN_PAGE_SIZE) ||
+	    ((len % XEN_BLKFRONT_SECTOR_SIZE) != 0)) {
+		return -EINVAL;
+	}
+
+	sector_count = len / XEN_BLKFRONT_SECTOR_SIZE;
+	if ((front->info.sectors == 0U) || (sector >= front->info.sectors) ||
+	    (sector_count > (front->info.sectors - sector))) {
+		return -ERANGE;
+	}
+
+	if (!front->info.writable) {
+		return -EROFS;
+	}
+
+	return xen_blkfront_queue_write(front, sector, data, len);
+}
+
+int xen_blkfront_flush(struct xen_blkfront *front)
+{
+	if (front == NULL) {
+		return -EINVAL;
+	}
+
+	if (!front->info.feature_flush_cache) {
+		return -ENOTSUP;
+	}
+
+	return xen_blkfront_queue_flush(front);
+}
+
 uint64_t xen_blkfront_sectors(const struct xen_blkfront *front)
 {
-	return (front != NULL) ? front->sectors : 0U;
+	return (front != NULL) ? front->info.sectors : 0U;
+}
+
+int xen_blkfront_get_info(const struct xen_blkfront *front, struct xen_blkfront_info *info)
+{
+	if ((front == NULL) || (info == NULL)) {
+		return -EINVAL;
+	}
+
+	*info = front->info;
+	return 0;
 }
 
 int xen_blkfront_close(struct xen_blkfront *front, char *xs_buf, size_t xs_buf_len)
