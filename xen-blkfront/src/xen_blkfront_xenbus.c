@@ -151,8 +151,12 @@ static int read_backend_bool_default(struct xen_blkfront *front, const char *nod
 
 	ret = read_backend_string(front, node, buf, len, timeout);
 	if (ret != 0) {
-		*value = default_value;
-		return 0;
+		if (ret == -ENOENT) {
+			*value = default_value;
+			return 0;
+		}
+
+		return ret;
 	}
 
 	ret = parse_u32(buf, &parsed);
@@ -172,8 +176,12 @@ static int read_backend_u32_default(struct xen_blkfront *front, const char *node
 
 	ret = read_backend_string(front, node, buf, len, timeout);
 	if (ret != 0) {
-		*value = default_value;
-		return 0;
+		if (ret == -ENOENT) {
+			*value = default_value;
+			return 0;
+		}
+
+		return ret;
 	}
 
 	return parse_u32(buf, value);
@@ -408,8 +416,12 @@ static int discover_backend_mode(struct xen_blkfront *front, char *buf, size_t l
 
 	ret = read_backend_string(front, "mode", buf, len, timeout);
 	if (ret != 0) {
-		front->info.writable = false;
-		return 0;
+		if (ret == -ENOENT) {
+			front->info.writable = false;
+			return 0;
+		}
+
+		return ret;
 	}
 
 	if (strcmp(buf, "w") == 0) {
@@ -444,8 +456,10 @@ int xen_blkfront_xenbus_discover(struct xen_blkfront *front, char *buf, size_t l
 	if (ret == 0) {
 		front->info.writable = front->info.writable &&
 				       ((front->info.info & VDISK_READONLY) == 0U);
-	} else {
+	} else if (ret == -ENOENT) {
 		front->info.info = front->info.writable ? 0U : VDISK_READONLY;
+	} else {
+		return ret;
 	}
 
 	ret = read_backend_u32_default(front, "sector-size", buf, len, timeout,
