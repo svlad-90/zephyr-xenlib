@@ -89,6 +89,33 @@ out_unlock:
 	return ret;
 }
 
+int xen_blkfront_queue_discard(struct xen_blkfront *front, uint64_t sector,
+			       uint64_t sector_count, bool secure)
+{
+	bool request_open = false;
+	uint64_t req_id;
+	uint8_t flags = secure ? BLKIF_DISCARD_SECURE : 0U;
+	int ret;
+
+	k_mutex_lock(&front->request_lock, K_FOREVER);
+
+	if (front->failed) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	req_id = front->next_req_id++;
+	ret = xen_blkfront_ring_discard(front, sector, sector_count, flags, req_id,
+					&request_open);
+	if (request_open) {
+		front->failed = true;
+	}
+
+out_unlock:
+	k_mutex_unlock(&front->request_lock);
+	return ret;
+}
+
 void xen_blkfront_queue_release_deferred(struct xen_blkfront *front)
 {
 	if ((front == NULL) || !front->has_deferred_data) {

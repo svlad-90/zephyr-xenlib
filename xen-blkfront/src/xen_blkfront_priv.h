@@ -98,11 +98,16 @@ void xen_blkfront_ring_init(struct xen_blkfront *front);
 int xen_blkfront_ring_request(struct xen_blkfront *front, grant_ref_t data_gref, uint64_t sector,
 			      size_t len, uint64_t req_id, uint8_t operation,
 			      bool *request_open);
+int xen_blkfront_ring_discard(struct xen_blkfront *front, uint64_t sector,
+			      uint64_t sector_count, uint8_t flags, uint64_t req_id,
+			      bool *request_open);
 
 int xen_blkfront_queue_read(struct xen_blkfront *front, uint64_t sector, void *data, size_t len);
 int xen_blkfront_queue_write(struct xen_blkfront *front, uint64_t sector, const void *data,
 			     size_t len);
 int xen_blkfront_queue_flush(struct xen_blkfront *front);
+int xen_blkfront_queue_discard(struct xen_blkfront *front, uint64_t sector,
+			       uint64_t sector_count, bool secure);
 void xen_blkfront_queue_release_deferred(struct xen_blkfront *front);
 
 #endif /* XENLIB_XEN_BLKFRONT_PRIV_H */

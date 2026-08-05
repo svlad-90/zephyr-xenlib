@@ -108,7 +108,8 @@ int xen_blkfront_open(const struct xen_blkfront_config *cfg, struct xen_blkfront
  * @param sector  First 512-byte sector to read.
  * @param data    Destination buffer.
  * @param len     Number of bytes to read; must be a non-zero multiple of 512
- *                and no larger than one Xen page.
+ *                bytes. The driver may split larger reads into smaller Xen
+ *                block protocol requests internally.
  *
  * @retval 0       Read completed successfully.
  * @retval -ERANGE Requested sector range is outside the backend capacity.
@@ -123,7 +124,8 @@ int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, s
  * @param sector  First 512-byte sector to write.
  * @param data    Source buffer.
  * @param len     Number of bytes to write; must be a non-zero multiple of 512
- *                and no larger than one Xen page.
+ *                bytes. The driver may split larger writes into smaller Xen
+ *                block protocol requests internally.
  *
  * @retval 0       Write completed successfully.
  * @retval -ERANGE Requested sector range is outside the backend capacity.
@@ -142,6 +144,29 @@ int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *
  * @retval -errno   Failed to submit or complete the request.
  */
 int xen_blkfront_flush(struct xen_blkfront *front);
+
+/**
+ * @brief Tell the backend that a sector range no longer contains useful data.
+ *
+ * Discard is the Xen block protocol operation behind trim/unmap. It does not
+ * transfer a data page; it asks blkback to release or forget the specified
+ * sectors when the backing storage supports that operation.
+ *
+ * @param front        Open frontend handle.
+ * @param sector       First 512-byte sector to discard.
+ * @param sector_count Number of contiguous 512-byte sectors to discard.
+ * @param secure       Request secure discard. This requires backend support.
+ *
+ * @retval 0        Discard request completed successfully.
+ * @retval -ENOTSUP Backend did not advertise discard support, secure discard
+ *                  was requested without support, or blkback rejected the
+ *                  request as unsupported.
+ * @retval -ERANGE  Requested sector range is outside the backend capacity.
+ * @retval -EINVAL  Requested range is empty or not discard-granularity aligned.
+ * @retval -errno   Failed to submit or complete the request.
+ */
+int xen_blkfront_discard(struct xen_blkfront *front, uint64_t sector,
+			 uint64_t sector_count, bool secure);
 
 /**
  * @brief Return the sector count advertised by the backend.

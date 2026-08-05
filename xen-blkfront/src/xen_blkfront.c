@@ -113,9 +113,13 @@ fail:
 
 int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, size_t len)
 {
+	uint8_t *cursor = data;
+	const uint64_t max_chunk_sectors = XEN_PAGE_SIZE / XEN_BLKFRONT_SECTOR_SIZE;
 	uint64_t sector_count;
+	uint64_t remaining;
+	int ret;
 
-	if ((front == NULL) || (data == NULL) || (len == 0) || (len > XEN_PAGE_SIZE) ||
+	if ((front == NULL) || (data == NULL) || (len == 0) ||
 	    ((len % XEN_BLKFRONT_SECTOR_SIZE) != 0)) {
 		return -EINVAL;
 	}
@@ -126,14 +130,38 @@ int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, s
 		return -ERANGE;
 	}
 
-	return xen_blkfront_queue_read(front, sector, data, len);
+	remaining = sector_count;
+	while (remaining > 0U) {
+		uint64_t chunk_sectors = remaining;
+		size_t chunk_len;
+
+		if (chunk_sectors > max_chunk_sectors) {
+			chunk_sectors = max_chunk_sectors;
+		}
+
+		chunk_len = (size_t)(chunk_sectors * XEN_BLKFRONT_SECTOR_SIZE);
+		ret = xen_blkfront_queue_read(front, sector, cursor, chunk_len);
+		if (ret != 0) {
+			return ret;
+		}
+
+		sector += chunk_sectors;
+		cursor += chunk_len;
+		remaining -= chunk_sectors;
+	}
+
+	return 0;
 }
 
 int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *data, size_t len)
 {
+	const uint8_t *cursor = data;
+	const uint64_t max_chunk_sectors = XEN_PAGE_SIZE / XEN_BLKFRONT_SECTOR_SIZE;
 	uint64_t sector_count;
+	uint64_t remaining;
+	int ret;
 
-	if ((front == NULL) || (data == NULL) || (len == 0) || (len > XEN_PAGE_SIZE) ||
+	if ((front == NULL) || (data == NULL) || (len == 0) ||
 	    ((len % XEN_BLKFRONT_SECTOR_SIZE) != 0)) {
 		return -EINVAL;
 	}
@@ -148,7 +176,27 @@ int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *
 		return -EROFS;
 	}
 
-	return xen_blkfront_queue_write(front, sector, data, len);
+	remaining = sector_count;
+	while (remaining > 0U) {
+		uint64_t chunk_sectors = remaining;
+		size_t chunk_len;
+
+		if (chunk_sectors > max_chunk_sectors) {
+			chunk_sectors = max_chunk_sectors;
+		}
+
+		chunk_len = (size_t)(chunk_sectors * XEN_BLKFRONT_SECTOR_SIZE);
+		ret = xen_blkfront_queue_write(front, sector, cursor, chunk_len);
+		if (ret != 0) {
+			return ret;
+		}
+
+		sector += chunk_sectors;
+		cursor += chunk_len;
+		remaining -= chunk_sectors;
+	}
+
+	return 0;
 }
 
 int xen_blkfront_flush(struct xen_blkfront *front)
@@ -162,6 +210,54 @@ int xen_blkfront_flush(struct xen_blkfront *front)
 	}
 
 	return xen_blkfront_queue_flush(front);
+}
+
+static bool discard_range_is_aligned(const struct xen_blkfront *front, uint64_t sector,
+				     uint64_t sector_count)
+{
+	uint64_t granularity = front->info.discard_granularity;
+	uint64_t alignment = front->info.discard_alignment;
+	uint64_t granularity_sectors;
+	uint64_t alignment_sectors;
+
+	if (granularity == 0U) {
+		granularity = XEN_BLKFRONT_SECTOR_SIZE;
+	}
+
+	if (((granularity % XEN_BLKFRONT_SECTOR_SIZE) != 0U) ||
+	    ((alignment % XEN_BLKFRONT_SECTOR_SIZE) != 0U)) {
+		return false;
+	}
+
+	granularity_sectors = granularity / XEN_BLKFRONT_SECTOR_SIZE;
+	alignment_sectors = alignment / XEN_BLKFRONT_SECTOR_SIZE;
+
+	return (granularity_sectors != 0U) && (sector >= alignment_sectors) &&
+	       (((sector - alignment_sectors) % granularity_sectors) == 0U) &&
+	       ((sector_count % granularity_sectors) == 0U);
+}
+
+int xen_blkfront_discard(struct xen_blkfront *front, uint64_t sector,
+			 uint64_t sector_count, bool secure)
+{
+	if ((front == NULL) || (sector_count == 0U)) {
+		return -EINVAL;
+	}
+
+	if (!front->info.feature_discard || (secure && !front->info.discard_secure)) {
+		return -ENOTSUP;
+	}
+
+	if ((front->info.sectors == 0U) || (sector >= front->info.sectors) ||
+	    (sector_count > (front->info.sectors - sector))) {
+		return -ERANGE;
+	}
+
+	if (!discard_range_is_aligned(front, sector, sector_count)) {
+		return -EINVAL;
+	}
+
+	return xen_blkfront_queue_discard(front, sector, sector_count, secure);
 }
 
 uint64_t xen_blkfront_sectors(const struct xen_blkfront *front)

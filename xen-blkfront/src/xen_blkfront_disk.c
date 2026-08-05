@@ -139,11 +139,17 @@ static int blkfront_disk_write(struct disk_info *disk, const uint8_t *data_buf,
 static int blkfront_disk_erase(struct disk_info *disk, uint32_t start_sector,
 			       uint32_t num_sector)
 {
-	ARG_UNUSED(disk);
-	ARG_UNUSED(start_sector);
-	ARG_UNUSED(num_sector);
+	struct xen_blkfront_disk *ctx = CONTAINER_OF(disk, struct xen_blkfront_disk, info);
 
-	return -ENOTSUP;
+	if (ctx->front == NULL) {
+		return -EINVAL;
+	}
+
+	if (num_sector == 0U) {
+		return 0;
+	}
+
+	return xen_blkfront_discard(ctx->front, start_sector, num_sector, false);
 }
 
 static int blkfront_disk_deinit(struct xen_blkfront_disk *ctx)
@@ -205,11 +211,22 @@ static int blkfront_disk_ioctl(struct disk_info *disk, uint8_t cmd, void *buff)
 		*(uint32_t *)buff = info.sector_size;
 		return 0;
 	case DISK_IOCTL_GET_ERASE_BLOCK_SZ:
-		if (buff == NULL) {
+		if ((ctx->front == NULL) || (buff == NULL)) {
 			return -EINVAL;
 		}
 
-		*(uint32_t *)buff = 1U;
+		ret = xen_blkfront_get_info(ctx->front, &info);
+		if (ret != 0) {
+			return ret;
+		}
+
+		if (!info.feature_discard || (info.discard_granularity == 0U) ||
+		    ((info.discard_granularity % XEN_BLKFRONT_SECTOR_SIZE) != 0U)) {
+			*(uint32_t *)buff = 1U;
+			return 0;
+		}
+
+		*(uint32_t *)buff = info.discard_granularity / XEN_BLKFRONT_SECTOR_SIZE;
 		return 0;
 	default:
 		return -EINVAL;

@@ -57,6 +57,41 @@ static int submit_request(struct xen_blkfront *front, grant_ref_t data_gref, uin
 	return 0;
 }
 
+static int submit_discard_request(struct xen_blkfront *front, uint64_t sector,
+				  uint64_t sector_count, uint8_t flags,
+				  uint64_t req_id, bool *request_open)
+{
+	blkif_request_discard_t *req;
+	int notify;
+	int ret;
+
+	if (RING_FULL(&front->ring)) {
+		return -EAGAIN;
+	}
+
+	req = (blkif_request_discard_t *)RING_GET_REQUEST(&front->ring,
+							   front->ring.req_prod_pvt);
+	memset(req, 0, sizeof(*req));
+	req->operation = BLKIF_OP_DISCARD;
+	req->flag = flags;
+	req->handle = front->vdev;
+	req->id = req_id;
+	req->sector_number = sector;
+	req->nr_sectors = sector_count;
+
+	front->ring.req_prod_pvt++;
+	*request_open = true;
+	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&front->ring, notify);
+	if (notify) {
+		ret = notify_evtchn((evtchn_port_t)front->evtchn);
+		if (ret != 0) {
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
 static int wait_response(struct xen_blkfront *front, uint64_t req_id, uint8_t operation,
 			 bool *request_open)
 {
@@ -103,4 +138,20 @@ int xen_blkfront_ring_request(struct xen_blkfront *front, grant_ref_t data_gref,
 	}
 
 	return wait_response(front, req_id, operation, request_open);
+}
+
+int xen_blkfront_ring_discard(struct xen_blkfront *front, uint64_t sector,
+			      uint64_t sector_count, uint8_t flags, uint64_t req_id,
+			      bool *request_open)
+{
+	int ret;
+
+	*request_open = false;
+	ret = submit_discard_request(front, sector, sector_count, flags, req_id,
+				     request_open);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return wait_response(front, req_id, BLKIF_OP_DISCARD, request_open);
 }
