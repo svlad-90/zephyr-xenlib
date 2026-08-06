@@ -36,7 +36,7 @@ config XEN_STORE_CLI
 config XEN_STORE_CLI_SHELL_CMDS
 	depends on SHELL
 	depends on XEN_STORE_CLI
-	bool "Enable XenStore cleint shell"
+	bool "Enable XenStore client shell"
 	help
 	  Enable shell for XenStore client.
 
