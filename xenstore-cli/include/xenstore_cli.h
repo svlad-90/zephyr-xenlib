@@ -17,6 +17,9 @@
 /** Convenience constant for requests issued outside a XenStore transaction. */
 #define XS_TRANSACTION_NONE 0U
 
+/** Maximum permission entries accepted by xs_set_permissions*() calls. */
+#define XS_SET_PERMS_MAX_ENTRIES 32U
+
 /**
  * @brief XenStore access rights for one domain permission entry.
  */

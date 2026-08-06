@@ -34,8 +34,6 @@ LOG_MODULE_REGISTER(xenstore_cli);
 /* XenStore frames always start with struct xsd_sockmsg followed by payload bytes. */
 #define SZ_SOCKMSG               sizeof(struct xsd_sockmsg)
 #define SZ_FRAME(h)              (SZ_SOCKMSG + h->len)
-/* Keep the fixed stack buffers for typed set-perms serialization bounded. */
-#define XS_SET_PERMS_MAX_ENTRIES 32
 /* Longest supported wire permission string: one access char plus 10 digit domid plus NUL. */
 #define XS_PERM_WIRE_ENTRY_MAX   12
 /* Longest XenStore error name, including its trailing NUL. */
