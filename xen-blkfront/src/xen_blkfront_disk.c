@@ -23,6 +23,13 @@
 #define XEN_BLKFRONT_DISK_NAME_MAX 16
 #define XEN_BLKFRONT_BACKEND_DOMID_PREFIX "/local/domain/"
 
+struct xen_blkfront_vbd_entry {
+	/* XenStore child name under CONFIG_XEN_BLKFRONT_DEVICE_ROOT. */
+	const char *name;
+	/* Parsed Xen virtual-device id used for deterministic sorting. */
+	uint16_t vdev;
+};
+
 struct xen_blkfront_disk {
 	/* Zephyr disk_access registration record embedded in this slot. */
 	struct disk_info info;
@@ -36,7 +43,7 @@ struct xen_blkfront_disk {
 	char backend_path[XEN_BLKFRONT_PATH_MAX];
 	/* Open protocol frontend, or NULL while the disk is not initialized. */
 	struct xen_blkfront *front;
-	/* Parsed Xen virtual-device id used for deterministic sorting. */
+	/* Xen virtual-device id parsed from the vbd child name. */
 	uint16_t vdev;
 	/* Backend domain id parsed from backend_path or the configured default. */
 	uint16_t backend_domid;
@@ -261,7 +268,6 @@ static int blkfront_disk_configure(struct xen_blkfront_disk *ctx, const char *vd
 static int blkfront_configure_one(const char *vdev_name)
 {
 	struct xen_blkfront_disk *ctx;
-	/* Xen virtual-device id parsed from the vbd child name. */
 	uint16_t vdev;
 	int ret;
 
@@ -283,10 +289,28 @@ static int blkfront_configure_one(const char *vdev_name)
 	return blkfront_disk_configure(ctx, vdev_name);
 }
 
+/* Sort discovered vbd entries by numeric virtual-device id. */
+static void blkfront_sort_entries(struct xen_blkfront_vbd_entry *entries, size_t count)
+{
+	for (size_t i = 1; i < count; i++) {
+		struct xen_blkfront_vbd_entry current = entries[i];
+		size_t j = i;
+
+		while ((j > 0U) && (entries[j - 1U].vdev > current.vdev)) {
+			entries[j] = entries[j - 1U];
+			j--;
+		}
+
+		entries[j] = current;
+	}
+}
+
 /* Discover current vbd children, configure slots, and drop removed devices. */
 static int blkfront_discover_disks(void)
 {
+	struct xen_blkfront_vbd_entry entries[CONFIG_XEN_BLKFRONT_MAX_DISKS];
 	char dir[CONFIG_XEN_BLKFRONT_XS_BUF_SIZE];
+	size_t entry_count = 0;
 	size_t pos = 0;
 	ssize_t len;
 	int ret = 0;
@@ -321,18 +345,39 @@ static int blkfront_discover_disks(void)
 		}
 
 		if (entry_len > 0U) {
-			ret = blkfront_configure_one(entry);
-			if (ret == -ENOENT) {
-				ret = 0;
-			} else if (ret == -ENOSPC) {
-				ret = 0;
-				break;
-			} else if (ret != 0) {
-				goto out;
+			uint16_t vdev;
+
+			ret = blkfront_parse_u16(entry, &vdev);
+			if (ret == 0) {
+				if (entry_count >= ARRAY_SIZE(entries)) {
+					break;
+				}
+
+				entries[entry_count].name = entry;
+				entries[entry_count].vdev = vdev;
+				entry_count++;
 			}
+			ret = 0;
 		}
 
 		pos += entry_len + 1U;
+	}
+
+	blkfront_sort_entries(entries, entry_count);
+
+	for (size_t i = 0; i < entry_count; i++) {
+		ret = blkfront_configure_one(entries[i].name);
+		if (ret == -ENOENT) {
+			ret = 0;
+			continue;
+		}
+		if (ret == -ENOSPC) {
+			ret = 0;
+			break;
+		}
+		if (ret != 0) {
+			goto out;
+		}
 	}
 
 out:
