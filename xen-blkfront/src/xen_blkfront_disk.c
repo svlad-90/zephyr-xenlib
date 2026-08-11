@@ -57,6 +57,14 @@ struct xen_blkfront_disk {
 K_MUTEX_DEFINE(blkfront_registry_lock);
 /* Bounded disk_access registry; each entry can bind one Xen vbd node. */
 static struct xen_blkfront_disk blkfront_disks[CONFIG_XEN_BLKFRONT_MAX_DISKS];
+/* XenStore watch object used to receive vbd directory changes. */
+static struct xs_watcher blkfront_vbd_watcher;
+/* Work item that performs discovery outside the XenStore watch callback. */
+static struct k_work blkfront_discovery_work;
+/* True after blkfront_vbd_watcher has an active watch in XenStore. */
+static bool blkfront_watch_registered;
+/* Shared scratch buffer required by xs_watch_timeout. */
+static char blkfront_watch_buf[CONFIG_XEN_BLKFRONT_XS_BUF_SIZE];
 
 /* disk_access init callback; lazily discovers and opens a configured slot. */
 static int blkfront_disk_init(struct disk_info *disk);
@@ -77,6 +85,8 @@ static int blkfront_disk_deinit_locked(struct xen_blkfront_disk *ctx);
 static int blkfront_disk_ioctl(struct disk_info *disk, uint8_t cmd, void *buff);
 /* Scan XenStore and bind present vbd entries to disk_access slots. */
 static int blkfront_discover_disks(void);
+/* Workqueue entry point for watch-driven discovery. */
+static void blkfront_discovery_work_handler(struct k_work *work);
 
 /* Zephyr disk_access vtable for every registered XENBLK<n> slot. */
 static const struct disk_operations blkfront_disk_ops = {
@@ -184,6 +194,67 @@ static struct xen_blkfront_disk *blkfront_first_unconfigured(void)
 	}
 
 	return NULL;
+}
+
+/* Accept watch events for the configured vbd root or absolute /device/vbd paths. */
+static bool blkfront_watch_path_matches_root(const char *path)
+{
+	size_t root_len;
+
+	if (path == NULL) {
+		return false;
+	}
+
+	root_len = strlen(CONFIG_XEN_BLKFRONT_DEVICE_ROOT);
+	if (strncmp(path, CONFIG_XEN_BLKFRONT_DEVICE_ROOT, root_len) == 0) {
+		return (path[root_len] == '\0') || (path[root_len] == '/');
+	}
+
+	return strstr(path, "/device/vbd") != NULL;
+}
+
+/* Register a XenStore watch on one path using the module scratch buffer. */
+static ssize_t blkfront_watch_path(const char *path)
+{
+	return xs_watch_timeout(path, "blkfront-vbd", blkfront_watch_buf,
+				sizeof(blkfront_watch_buf), XS_TRANSACTION_NONE,
+				K_MSEC(CONFIG_XEN_BLKFRONT_XS_TIMEOUT_MS));
+}
+
+/* XenStore callback that schedules discovery for relevant vbd tree changes. */
+static void blkfront_vbd_watch_cb(const char *path, const char *token, void *param)
+{
+	ARG_UNUSED(token);
+	ARG_UNUSED(param);
+
+	if (blkfront_watch_path_matches_root(path)) {
+		(void)k_work_submit(&blkfront_discovery_work);
+	}
+}
+
+/* Start the vbd watch, falling back to the parent path when vbd is absent. */
+static int blkfront_watch_start_locked(void)
+{
+	ssize_t len;
+	int ret;
+
+	if (blkfront_watch_registered) {
+		return 0;
+	}
+
+	ret = xs_watcher_register(&blkfront_vbd_watcher);
+	if (ret != 0) {
+		return ret;
+	}
+
+	len = blkfront_watch_path(CONFIG_XEN_BLKFRONT_DEVICE_ROOT);
+	if (len < 0) {
+		(void)xs_watcher_unregister(&blkfront_vbd_watcher);
+		return (int)len;
+	}
+
+	blkfront_watch_registered = true;
+	return 0;
 }
 
 /* Open the frontend for a disk_access slot, discovering the slot on demand. */
@@ -322,6 +393,11 @@ static int blkfront_discover_disks(void)
 		goto out;
 	}
 
+	ret = blkfront_watch_start_locked();
+	if (ret != 0) {
+		goto out;
+	}
+
 	len = xs_directory_timeout(CONFIG_XEN_BLKFRONT_DEVICE_ROOT, dir, sizeof(dir),
 				   XS_TRANSACTION_NONE,
 				   K_MSEC(CONFIG_XEN_BLKFRONT_XS_TIMEOUT_MS));
@@ -383,6 +459,14 @@ static int blkfront_discover_disks(void)
 out:
 	k_mutex_unlock(&blkfront_registry_lock);
 	return ret;
+}
+
+/* Workqueue wrapper for asynchronous XenStore watch events. */
+static void blkfront_discovery_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	(void)blkfront_discover_disks();
 }
 
 /* Report initialized/uninitialized state to Zephyr disk_access. */
@@ -654,6 +738,9 @@ static int blkfront_disk_register(void)
 			return ret;
 		}
 	}
+
+	xs_watcher_init(&blkfront_vbd_watcher, blkfront_vbd_watch_cb, NULL);
+	k_work_init(&blkfront_discovery_work, blkfront_discovery_work_handler);
 
 	return 0;
 }
