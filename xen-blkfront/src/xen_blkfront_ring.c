@@ -14,15 +14,15 @@ void xen_blkfront_ring_init(struct xen_blkfront *front)
 	XEN_FRONT_RING_INIT(&front->ring, front->sring, XEN_PAGE_SIZE);
 }
 
-static int submit_request(struct xen_blkfront *front, grant_ref_t data_gref, uint64_t sector,
-			  size_t len, uint64_t req_id, uint8_t operation, bool *request_open)
+/* Fill and publish a request that has no data segments, currently flush. */
+static int submit_request(struct xen_blkfront *front, uint64_t req_id, uint8_t operation,
+			  bool *request_open)
 {
 	struct blkif_request *req;
-	bool data_request = (operation == BLKIF_OP_READ) || (operation == BLKIF_OP_WRITE);
 	int notify;
 	int ret;
 
-	if (!data_request && (operation != BLKIF_OP_FLUSH_DISKCACHE)) {
+	if (operation != BLKIF_OP_FLUSH_DISKCACHE) {
 		return -EINVAL;
 	}
 
@@ -36,12 +36,68 @@ static int submit_request(struct xen_blkfront *front, grant_ref_t data_gref, uin
 	req->handle = front->vdev;
 	req->id = req_id;
 
-	if (data_request) {
-		req->nr_segments = 1;
-		req->sector_number = sector;
-		req->seg[0].gref = data_gref;
-		req->seg[0].first_sect = 0;
-		req->seg[0].last_sect = (len / XEN_BLKFRONT_SECTOR_SIZE) - 1U;
+	front->ring.req_prod_pvt++;
+	*request_open = true;
+	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&front->ring, notify);
+	if (notify) {
+		ret = notify_evtchn((evtchn_port_t)front->evtchn);
+		if (ret != 0) {
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+/* Fill and publish one ordinary blkif read/write request with data segments. */
+static int submit_data_request(struct xen_blkfront *front,
+			       const struct xen_blkfront_data_request *data,
+			       uint64_t sector, uint64_t req_id, uint8_t operation,
+			       bool *request_open)
+{
+	struct blkif_request *req;
+	size_t remaining;
+	int notify;
+	int ret;
+
+	if (((operation != BLKIF_OP_READ) && (operation != BLKIF_OP_WRITE)) ||
+	    (data == NULL) || (data->pages == NULL) || (data->nr_segments == 0U) ||
+	    (data->nr_segments > XEN_BLKFRONT_MAX_SEGMENTS_PER_REQUEST) ||
+	    (data->nr_segments > BLKIF_MAX_SEGMENTS_PER_REQUEST) ||
+	    (data->len == 0U)) {
+		return -EINVAL;
+	}
+
+	if (RING_FULL(&front->ring)) {
+		return -EAGAIN;
+	}
+
+	req = RING_GET_REQUEST(&front->ring, front->ring.req_prod_pvt);
+	memset(req, 0, sizeof(*req));
+	req->operation = operation;
+	req->nr_segments = data->nr_segments;
+	req->handle = front->vdev;
+	req->id = req_id;
+	req->sector_number = sector;
+
+	remaining = data->len;
+	for (uint8_t i = 0; i < data->nr_segments; i++) {
+		size_t segment_len = MIN(remaining, (size_t)XEN_PAGE_SIZE);
+
+		if ((segment_len == 0U) ||
+		    ((segment_len % XEN_BLKFRONT_SECTOR_SIZE) != 0U)) {
+			return -EINVAL;
+		}
+
+		req->seg[i].gref = data->pages[i].gref;
+		req->seg[i].first_sect = 0U;
+		req->seg[i].last_sect =
+			(uint8_t)((segment_len / XEN_BLKFRONT_SECTOR_SIZE) - 1U);
+		remaining -= segment_len;
+	}
+
+	if (remaining != 0U) {
+		return -EINVAL;
 	}
 
 	front->ring.req_prod_pvt++;
@@ -127,14 +183,29 @@ static int wait_response(struct xen_blkfront *front, uint64_t req_id, uint8_t op
 	return -ETIMEDOUT;
 }
 
-int xen_blkfront_ring_request(struct xen_blkfront *front, grant_ref_t data_gref, uint64_t sector,
-			      size_t len, uint64_t req_id, uint8_t operation,
-			      bool *request_open)
+int xen_blkfront_ring_request(struct xen_blkfront *front, uint64_t req_id,
+			      uint8_t operation, bool *request_open)
 {
 	int ret;
 
 	*request_open = false;
-	ret = submit_request(front, data_gref, sector, len, req_id, operation, request_open);
+	ret = submit_request(front, req_id, operation, request_open);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return wait_response(front, req_id, operation, request_open);
+}
+
+int xen_blkfront_ring_data_request(struct xen_blkfront *front,
+				   const struct xen_blkfront_data_request *data,
+				   uint64_t sector, uint64_t req_id,
+				   uint8_t operation, bool *request_open)
+{
+	int ret;
+
+	*request_open = false;
+	ret = submit_data_request(front, data, sector, req_id, operation, request_open);
 	if (ret != 0) {
 		return ret;
 	}

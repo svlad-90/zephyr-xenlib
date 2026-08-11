@@ -13,6 +13,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/barrier.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/xen/events.h>
 #include <zephyr/xen/generic.h>
 #include <zephyr/xen/gnttab.h>
@@ -46,12 +47,29 @@
 #define XEN_BLKFRONT_RESPONSE_POLL K_MSEC(10)
 #define XEN_BLKFRONT_BACKEND_WAIT_ATTEMPTS_DEFAULT 60U
 #define XEN_BLKFRONT_BACKEND_RETRY_DELAY_DEFAULT K_MSEC(100)
+#define XEN_BLKFRONT_MAX_SEGMENTS_PER_REQUEST 4U
+#define XEN_BLKFRONT_MAX_SECTORS_PER_SEGMENT \
+	(XEN_PAGE_SIZE / XEN_BLKFRONT_SECTOR_SIZE)
+#define XEN_BLKFRONT_MAX_SECTORS_PER_REQUEST \
+	(XEN_BLKFRONT_MAX_SEGMENTS_PER_REQUEST * XEN_BLKFRONT_MAX_SECTORS_PER_SEGMENT)
+
+BUILD_ASSERT(XEN_BLKFRONT_MAX_SEGMENTS_PER_REQUEST <= BLKIF_MAX_SEGMENTS_PER_REQUEST,
+	     "Frontend segment limit exceeds the Xen block ring ABI");
 
 struct xen_blkfront_data_page {
 	/* Guest page shared with blkback for one data segment. */
 	uint8_t *page;
 	/* Grant-table reference that gives the backend temporary page access. */
 	grant_ref_t gref;
+};
+
+struct xen_blkfront_data_request {
+	/* Segment pages prepared from the frontend data pool. */
+	struct xen_blkfront_data_page *pages;
+	/* Total byte count carried by this request. */
+	size_t len;
+	/* Number of valid entries in pages[]. */
+	uint8_t nr_segments;
 };
 
 struct xen_blkfront {
@@ -71,7 +89,8 @@ struct xen_blkfront {
 	struct k_sem evtchn_sem;
 	/* Serializes all requests that use the shared ring and data pool. */
 	struct k_mutex request_lock;
-	struct xen_blkfront_data_page deferred_data;
+	/* Fixed pool of grant-backed pages used by ordinary data requests. */
+	struct xen_blkfront_data_page data_pool[XEN_BLKFRONT_MAX_SEGMENTS_PER_REQUEST];
 	/* Timeout used for individual XenStore read and write operations. */
 	k_timeout_t xs_timeout;
 	/* Delay between backend state/path polling attempts. */
@@ -90,6 +109,8 @@ struct xen_blkfront {
 	bool failed;
 	/* A published data request may still have backend access to data_pool. */
 	bool has_deferred_data;
+	/* True after every data_pool page has an active grant reference. */
+	bool data_pool_allocated;
 	/* True after frontend XenStore nodes have been published. */
 	bool published;
 	/* True after evtchn has a registered Zephyr callback. */
@@ -117,6 +138,9 @@ int xen_blkfront_xenbus_publish_frontend(struct xen_blkfront *front, char *buf, 
 /* Poll the backend XenBus state until blkback reports Connected. */
 int xen_blkfront_xenbus_wait_connected(struct xen_blkfront *front, char *buf, size_t len,
 				       uint16_t attempts, k_timeout_t retry_delay);
+/* Publish frontend Connected after transport setup and backend readiness. */
+int xen_blkfront_xenbus_publish_connected(struct xen_blkfront *front, char *buf, size_t len,
+					  k_timeout_t timeout);
 /* Read backend geometry and optional feature nodes into front->info. */
 int xen_blkfront_xenbus_discover(struct xen_blkfront *front, char *buf, size_t len,
 				 k_timeout_t timeout);
@@ -146,9 +170,14 @@ void xen_blkfront_transport_free_data_page(struct xen_blkfront_data_page *data);
 
 /* Initialize Xen ring indexes around an already allocated shared ring page. */
 void xen_blkfront_ring_init(struct xen_blkfront *front);
-int xen_blkfront_ring_request(struct xen_blkfront *front, grant_ref_t data_gref, uint64_t sector,
-			      size_t len, uint64_t req_id, uint8_t operation,
-			      bool *request_open);
+/* Submit a non-data request, currently flush, and wait for completion. */
+int xen_blkfront_ring_request(struct xen_blkfront *front, uint64_t req_id,
+			      uint8_t operation, bool *request_open);
+/* Submit a read/write request using the prepared grant-backed data segments. */
+int xen_blkfront_ring_data_request(struct xen_blkfront *front,
+				   const struct xen_blkfront_data_request *data,
+				   uint64_t sector, uint64_t req_id,
+				   uint8_t operation, bool *request_open);
 /* Submit a discard request over a sector range and wait for completion. */
 int xen_blkfront_ring_discard(struct xen_blkfront *front, uint64_t sector,
 			      uint64_t sector_count, uint8_t flags, uint64_t req_id,
@@ -170,6 +199,10 @@ int xen_blkfront_queue_flush(struct xen_blkfront *front);
 /* Submit a backend discard request for an already validated sector range. */
 int xen_blkfront_queue_discard(struct xen_blkfront *front, uint64_t sector,
 			       uint64_t sector_count, bool secure);
+/* Allocate every page in the fixed grant-backed data pool. */
+int xen_blkfront_queue_alloc_data_pool(struct xen_blkfront *front);
+/* Release all data-pool grant references when backend access is no longer possible. */
+void xen_blkfront_queue_free_data_pool(struct xen_blkfront *front);
 /* Clear deferred data ownership after the frontend has been closed. */
 void xen_blkfront_queue_release_deferred(struct xen_blkfront *front);
 

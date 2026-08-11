@@ -34,6 +34,7 @@ static int release_frontend(struct xen_blkfront *front, char *xs_buf, size_t xs_
 	k_mutex_lock(&front->request_lock, K_FOREVER);
 	ret = xen_blkfront_xenbus_close(front, xs_buf, xs_buf_len);
 	xen_blkfront_queue_release_deferred(front);
+	xen_blkfront_queue_free_data_pool(front);
 	xen_blkfront_transport_cleanup(front);
 	k_mutex_unlock(&front->request_lock);
 	return ret;
@@ -86,6 +87,11 @@ int xen_blkfront_open(const struct xen_blkfront_config *cfg, struct xen_blkfront
 		goto fail;
 	}
 
+	ret = xen_blkfront_queue_alloc_data_pool(front);
+	if (ret != 0) {
+		goto fail;
+	}
+
 	ret = xen_blkfront_xenbus_publish_frontend(front, xs_buf, xs_buf_len,
 						   cfg->xs_timeout);
 	if (ret != 0) {
@@ -95,6 +101,12 @@ int xen_blkfront_open(const struct xen_blkfront_config *cfg, struct xen_blkfront
 	ret = xen_blkfront_xenbus_wait_connected(front, xs_buf, xs_buf_len,
 						 front->backend_wait_attempts,
 						 front->backend_retry_delay);
+	if (ret != 0) {
+		goto fail;
+	}
+
+	ret = xen_blkfront_xenbus_publish_connected(front, xs_buf, xs_buf_len,
+						    cfg->xs_timeout);
 	if (ret != 0) {
 		goto fail;
 	}
@@ -116,7 +128,7 @@ fail:
 int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, size_t len)
 {
 	uint8_t *cursor = data;
-	const uint64_t max_chunk_sectors = XEN_PAGE_SIZE / XEN_BLKFRONT_SECTOR_SIZE;
+	const uint64_t max_chunk_sectors = XEN_BLKFRONT_MAX_SECTORS_PER_REQUEST;
 	uint64_t sector_count;
 	uint64_t remaining;
 	int ret;
@@ -158,7 +170,7 @@ int xen_blkfront_read(struct xen_blkfront *front, uint64_t sector, void *data, s
 int xen_blkfront_write(struct xen_blkfront *front, uint64_t sector, const void *data, size_t len)
 {
 	const uint8_t *cursor = data;
-	const uint64_t max_chunk_sectors = XEN_PAGE_SIZE / XEN_BLKFRONT_SECTOR_SIZE;
+	const uint64_t max_chunk_sectors = XEN_BLKFRONT_MAX_SECTORS_PER_REQUEST;
 	uint64_t sector_count;
 	uint64_t remaining;
 	int ret;
