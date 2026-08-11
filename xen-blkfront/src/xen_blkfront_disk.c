@@ -172,6 +172,27 @@ static int blkfront_make_device_path(char *path, size_t len, const char *vdev)
 	return 0;
 }
 
+/* Return the parent XenStore path used when the vbd root is not present yet. */
+static int blkfront_make_parent_path(char *parent, size_t len, const char *path)
+{
+	const char *last_slash;
+	size_t parent_len;
+
+	last_slash = strrchr(path, '/');
+	if ((last_slash == NULL) || (last_slash == path)) {
+		return -ENOENT;
+	}
+
+	parent_len = (size_t)(last_slash - path);
+	if (parent_len >= len) {
+		return -ENAMETOOLONG;
+	}
+
+	memcpy(parent, path, parent_len);
+	parent[parent_len] = '\0';
+	return 0;
+}
+
 /* Find the already configured slot for a virtual-device id. */
 static struct xen_blkfront_disk *blkfront_find_by_vdev(uint16_t vdev)
 {
@@ -235,6 +256,7 @@ static void blkfront_vbd_watch_cb(const char *path, const char *token, void *par
 /* Start the vbd watch, falling back to the parent path when vbd is absent. */
 static int blkfront_watch_start_locked(void)
 {
+	char parent[XEN_BLKFRONT_PATH_MAX];
 	ssize_t len;
 	int ret;
 
@@ -248,6 +270,13 @@ static int blkfront_watch_start_locked(void)
 	}
 
 	len = blkfront_watch_path(CONFIG_XEN_BLKFRONT_DEVICE_ROOT);
+	if (len == -ENOENT) {
+		ret = blkfront_make_parent_path(parent, sizeof(parent),
+						CONFIG_XEN_BLKFRONT_DEVICE_ROOT);
+		if (ret == 0) {
+			len = blkfront_watch_path(parent);
+		}
+	}
 	if (len < 0) {
 		(void)xs_watcher_unregister(&blkfront_vbd_watcher);
 		return (int)len;
