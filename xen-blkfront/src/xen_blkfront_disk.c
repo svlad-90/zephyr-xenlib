@@ -49,6 +49,8 @@ struct xen_blkfront_disk {
 	uint16_t backend_domid;
 	/* True after the slot has been bound to a XenStore vbd entry. */
 	bool configured;
+	/* Mark bit for the current discovery scan. */
+	bool present;
 	/* Per-slot scratch buffer used by XenStore and close/open operations. */
 	char xs_buf[CONFIG_XEN_BLKFRONT_XS_BUF_SIZE];
 };
@@ -360,6 +362,7 @@ static int blkfront_disk_configure(struct xen_blkfront_disk *ctx, const char *vd
 	ctx->backend_path[len] = '\0';
 	ctx->backend_domid = blkfront_backend_domid_from_path(ctx->backend_path);
 	ctx->configured = true;
+	ctx->present = true;
 
 	return 0;
 }
@@ -378,6 +381,7 @@ static int blkfront_configure_one(const char *vdev_name)
 
 	ctx = blkfront_find_by_vdev(vdev);
 	if (ctx != NULL) {
+		ctx->present = true;
 		return 0;
 	}
 
@@ -405,6 +409,27 @@ static void blkfront_sort_entries(struct xen_blkfront_vbd_entry *entries, size_t
 	}
 }
 
+/* Close and free slots that disappeared from the latest XenStore scan. */
+static void blkfront_forget_missing_disks(void)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(blkfront_disks); i++) {
+		struct xen_blkfront_disk *ctx = &blkfront_disks[i];
+
+		if (!ctx->configured || ctx->present) {
+			continue;
+		}
+
+		k_mutex_lock(&ctx->lock, K_FOREVER);
+		(void)blkfront_disk_deinit_locked(ctx);
+		ctx->frontend_path[0] = '\0';
+		ctx->backend_path[0] = '\0';
+		ctx->vdev = 0;
+		ctx->backend_domid = 0;
+		ctx->configured = false;
+		k_mutex_unlock(&ctx->lock);
+	}
+}
+
 /* Discover current vbd children, configure slots, and drop removed devices. */
 static int blkfront_discover_disks(void)
 {
@@ -427,10 +452,15 @@ static int blkfront_discover_disks(void)
 		goto out;
 	}
 
+	for (size_t i = 0; i < ARRAY_SIZE(blkfront_disks); i++) {
+		blkfront_disks[i].present = false;
+	}
+
 	len = xs_directory_timeout(CONFIG_XEN_BLKFRONT_DEVICE_ROOT, dir, sizeof(dir),
 				   XS_TRANSACTION_NONE,
 				   K_MSEC(CONFIG_XEN_BLKFRONT_XS_TIMEOUT_MS));
 	if (len == -ENOENT) {
+		blkfront_forget_missing_disks();
 		ret = 0;
 		goto out;
 	}
@@ -484,6 +514,8 @@ static int blkfront_discover_disks(void)
 			goto out;
 		}
 	}
+
+	blkfront_forget_missing_disks();
 
 out:
 	k_mutex_unlock(&blkfront_registry_lock);
