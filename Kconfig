@@ -57,7 +57,7 @@ config XEN_BLKFRONT
 	depends on XEN_GRANT_TABLE
 	depends on XEN_EVENTS
 	help
-	  Enable a Xen paravirtual block frontend. The current API connects one
+	  Enable a Xen paravirtual block frontend. Each frontend connects one
 	  virtual block device through XenStore, discovers backend capabilities,
 	  and supports serialized read, write, flush, and discard requests.
 	  Public read and write calls may cover more than one Xen page, but the
@@ -65,6 +65,64 @@ config XEN_BLKFRONT
 	  with a bounded multi-segment data grant limit per request. Indirect
 	  descriptors, persistent grants, and multiple queues are discovered but
 	  not used for request submission.
+
+if XEN_BLKFRONT
+
+config XEN_BLKFRONT_DISK_ACCESS
+	bool "Expose Xen PV block frontend as a Zephyr disk"
+	depends on DISK_ACCESS
+	help
+	  Discover Xen PV block frontend entries published under the guest
+	  XenStore device tree and register them as Zephyr disk_access disks. This
+	  adapter supports read/write, cache sync, and physical erase when each
+	  backend advertises the corresponding write, flush, and discard support.
+
+config XEN_BLKFRONT_MAX_DISKS
+	int "Maximum Xen PV block disks to expose"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 4
+	range 1 16
+	help
+	  Maximum number of XenStore vbd entries to register as Zephyr disk_access
+	  disks. Extra XenStore entries remain unregistered.
+
+config XEN_BLKFRONT_DISK_NAME_PREFIX
+	string "Xen PV block disk name prefix"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default "XENBLK"
+	help
+	  Prefix used for disk_access names. Discovered disks are registered as
+	  XENBLK0, XENBLK1, and so on by default.
+
+config XEN_BLKFRONT_DEVICE_ROOT
+	string "XenStore vbd device root"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default "device/vbd"
+	help
+	  XenStore directory containing vbd frontend entries for this guest. The
+	  default is relative to the guest domain path, so it resolves to this
+	  domain's /local/domain/<domid>/device/vbd tree. Each child node is
+	  treated as one virtual block-device id.
+
+config XEN_BLKFRONT_BACKEND_DOMID
+	int "Fallback Xen PV block backend domain id"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 0
+	help
+	  Backend domain id used only when the backend path published in XenStore
+	  does not follow the normal /local/domain/<domid>/backend/vbd/... shape.
+
+config XEN_BLKFRONT_XS_TIMEOUT_MS
+	int "Xen PV block XenStore request timeout in milliseconds"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 1000
+
+config XEN_BLKFRONT_XS_BUF_SIZE
+	int "Xen PV block XenStore temporary buffer size"
+	depends on XEN_BLKFRONT_DISK_ACCESS
+	default 512
+
+endif # XEN_BLKFRONT
 
 config XEN_LIBFDT
 	bool "Enable libfdt support"

@@ -12,5 +12,8 @@ zephyr_library_sources(
   src/xen_blkfront_transport.c
   src/xen_blkfront_xenbus.c
 )
+zephyr_library_sources_ifdef(CONFIG_XEN_BLKFRONT_DISK_ACCESS
+  src/xen_blkfront_disk.c
+)
 zephyr_library_link_libraries(XEN_BLKFRONT XENSTORE_CLI)
 zephyr_include_directories(include)
