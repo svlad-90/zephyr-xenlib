@@ -51,6 +51,16 @@ config XEN_STORE_CLI_WORKQ_STACK_SIZE
 
 endif
 
+config XEN_BLKFRONT
+	bool "Enable Xen PV block frontend"
+	depends on XEN_STORE_CLI
+	depends on XEN_GRANT_TABLE
+	depends on XEN_EVENTS
+	help
+	  Enable a minimal Xen paravirtual block frontend. The current API
+	  connects one virtual block device through XenStore, discovers selected
+	  backend capabilities, and supports serialized read/write requests.
+
 config XEN_LIBFDT
 	bool "Enable libfdt support"
 	help
