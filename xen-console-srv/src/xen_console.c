@@ -321,6 +321,13 @@ int xen_start_domain_console(struct xen_domain *domain)
 				console_read_thrd, console,
 				NULL, NULL, XEN_CONSOLE_PRIO, 0, K_NO_WAIT);
 
+	if (IS_ENABLED(CONFIG_THREAD_NAME)) {
+		char name[CONFIG_THREAD_MAX_NAME_LEN];
+
+		snprintk(name, sizeof(name), "console_ext-d%u", domain->domid);
+		k_thread_name_set(&console->ext_thrd, name);
+	}
+
 	return 0;
 }
 
@@ -510,6 +517,13 @@ int xen_attach_domain_console(const struct shell *shell,
 			XEN_CONSOLE_STACK_SIZE,
 			console_display_thrd, console,
 			(void *)shell, NULL, XEN_CONSOLE_PRIO, 0, K_NO_WAIT);
+
+	if (IS_ENABLED(CONFIG_THREAD_NAME)) {
+		char name[CONFIG_THREAD_MAX_NAME_LEN];
+
+		snprintk(name, sizeof(name), "console_disp-d%u", domain->domid);
+		k_thread_name_set(&console->int_thrd, name);
+	}
 
 	shell_set_bypass(shell, console_shell_cb, NULL);
 
