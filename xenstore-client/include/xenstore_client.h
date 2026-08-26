@@ -374,6 +374,46 @@ ssize_t xs_watch(const char *path, const char *token, char *buf, size_t len, uin
  */
 ssize_t xs_unwatch(const char *path, const char *token, char *buf, size_t len, uint32_t tx_id);
 
+#if defined(CONFIG_XEN_STORE_CLIENT) && !defined(CONFIG_XEN_STORE_SRV)
+static inline int xss_read(const char *path, char *value, size_t len)
+{
+	ssize_t ret = xs_read(path, value, len, XS_TRANSACTION_NONE);
+
+	return (ret < 0) ? (int)ret : 0;
+}
+
+static inline int xss_write(const char *path, const char *value)
+{
+	char response[sizeof("ENOTEMPTY")];
+	ssize_t ret;
+
+	if (!value) {
+		return -EINVAL;
+	}
+
+	ret = xs_write(path, value, strlen(value), response, sizeof(response), XS_TRANSACTION_NONE);
+	return (ret < 0) ? (int)ret : 0;
+}
+
+static inline int xss_set_perm(const char *path, domid_t domid, enum xs_perm perm)
+{
+	const struct xs_perm_entry entry = {
+		.domid = domid,
+		.perm = perm,
+	};
+
+	return xs_set_permissions(path, &entry, 1, XS_TRANSACTION_NONE);
+}
+
+static inline int xss_rm(const char *path)
+{
+	char response[sizeof("ENOTEMPTY")];
+	ssize_t ret = xs_rm(path, response, sizeof(response), XS_TRANSACTION_NONE);
+
+	return (ret < 0) ? (int)ret : 0;
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif
