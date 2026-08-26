@@ -651,63 +651,32 @@ static struct xs_permissions *deserialize_perms(const char *strings, const size_
 						size_t *perms_num)
 {
 	struct xs_permissions *perms;
-	const char *ptr;
-	char *str_endptr;
-	size_t i, j;
+	struct xs_perm_entry entries[XENSTORE_PERM_MAX_ENTRIES];
+	size_t parsed_num;
+	int rc;
 
 	if (!strings || !perms_num) {
 		return NULL;
 	}
 
 	*perms_num = 0;
-	ptr = strings;
-	/* Count the number of perms to further memory allocation */
-	for (i = 0; i < str_len;) {
-		i += strlen(ptr + i) + 1;
-		(*perms_num)++;
+	rc = xenstore_perm_parse_wire(strings, str_len, entries, ARRAY_SIZE(entries), &parsed_num);
+	if (rc < 0) {
+		return NULL;
 	}
 
-	perms = k_malloc(sizeof(*perms) * (*perms_num));
+	perms = k_malloc(sizeof(*perms) * parsed_num);
 	if (!perms) {
 		return NULL;
 	}
 
-	for (i = 0, j = 0; i < str_len && j < (*perms_num); j++) {
-		switch (ptr[i]) {
-		case 'w':
-			perms[j].perms = XS_PERM_WRITE;
-			break;
-		case 'r':
-			perms[j].perms = XS_PERM_READ;
-			break;
-		case 'b':
-			perms[j].perms = (XS_PERM_READ | XS_PERM_WRITE);
-			break;
-		case 'n':
-			perms[j].perms = XS_PERM_NONE;
-			break;
-		default:
-			goto err_free;
-		}
-		if (i + 1 >= str_len) {
-			goto err_free;
-		}
-
-		perms[j].domid = strtoul(ptr + i + 1, &str_endptr, 10);
-		/* If str_endptr is not pointing to terminating null, conversion is failed */
-		if (*str_endptr != '\0') {
-			goto err_free;
-		}
-
-		i += strlen(ptr + i) + 1;
+	for (size_t i = 0; i < parsed_num; i++) {
+		perms[i].domid = entries[i].domid;
+		perms[i].perms = entries[i].perm;
 	}
 
+	*perms_num = parsed_num;
 	return perms;
-
-err_free:
-	k_free(perms);
-	*perms_num = 0;
-	return NULL;
 }
 
 static int set_perms_by_strings(struct xs_entry *entry, const char *perm_str,
@@ -1259,26 +1228,13 @@ static void handle_control(struct xenstore *xenstore, uint32_t id,
 	send_reply(xenstore, id, XS_CONTROL, "OK");
 }
 
-static char perm_to_char(const uint32_t perm)
-{
-	switch (perm & XS_PERM_BOTH) {
-	case XS_PERM_WRITE:
-		return 'w';
-	case XS_PERM_READ:
-		return 'r';
-	case XS_PERM_BOTH:
-		return 'b';
-	default:
-		return 'n';
-	}
-}
-
 /* The function allocates memory for the buffer, that should be freed by caller */
 static char *serialize_perms(struct xs_entry *entry, size_t *total_size)
 {
 	struct xs_permissions *iter;
 	char *perm_str;
-	size_t curr_len = 0, max_len = 0;
+	int curr_len = 0;
+	size_t max_len = 0;
 
 	if (!total_size) {
 		return NULL;
@@ -1287,8 +1243,7 @@ static char *serialize_perms(struct xs_entry *entry, size_t *total_size)
 
 	/* Count the maximum needed memory for string at first */
 	SYS_SLIST_FOR_EACH_CONTAINER(&entry->perms, iter, node) {
-		/* max domid value (it counts terminating NULL) + permission char */
-		max_len += UINT32_MAX_STR_LEN + 1;
+		max_len += XENSTORE_PERM_WIRE_ENTRY_MAX;
 	}
 
 	perm_str = k_malloc(max_len);
@@ -1297,8 +1252,17 @@ static char *serialize_perms(struct xs_entry *entry, size_t *total_size)
 	}
 
 	SYS_SLIST_FOR_EACH_CONTAINER(&entry->perms, iter, node) {
-		curr_len = snprintf(&perm_str[*total_size], UINT32_MAX_STR_LEN + 1, "%c%u",
-				    perm_to_char(iter->perms), iter->domid);
+		struct xs_perm_entry perm = {
+			.domid = iter->domid,
+			.perm = iter->perms,
+		};
+
+		curr_len = xenstore_perm_format_wire(&perm_str[*total_size],
+						     XENSTORE_PERM_WIRE_ENTRY_MAX, &perm);
+		if (curr_len < 0 || curr_len >= XENSTORE_PERM_WIRE_ENTRY_MAX) {
+			k_free(perm_str);
+			return NULL;
+		}
 		/* Add size for terminating NULL */
 		*total_size += curr_len + 1;
 	}
@@ -2038,4 +2002,3 @@ int xs_init_root(void)
 
 	return set_perms_by_array(&root_xenstore, &permissions, 1);
 }
-

@@ -14,10 +14,36 @@
 #include <string.h>
 #include <stdio.h>
 #include <xen/public/io/xs_wire.h>
+#include <xen/public/xen.h>
 
 #include <zephyr/sys/barrier.h>
 #include <zephyr/sys/slist.h>
 #include <zephyr/xen/events.h>
+
+#define XENSTORE_PERM_MAX_ENTRIES 32
+#define XENSTORE_PERM_WIRE_ENTRY_MAX 12
+
+/**
+ * @brief Xenstore entry access permissions.
+ */
+enum xs_perm {
+	/** No read or write access. */
+	XS_PERM_NONE = 0x0,
+	/** Read access. */
+	XS_PERM_READ = 0x1,
+	/** Write access. */
+	XS_PERM_WRITE = 0x2,
+	/** Read and write access. */
+	XS_PERM_BOTH = XS_PERM_WRITE | XS_PERM_READ
+};
+
+/**
+ * @brief Xenstore permission entry for one domain.
+ */
+struct xs_perm_entry {
+	domid_t domid;
+	enum xs_perm perm;
+};
 
 /**
  * @brief Check whether a given path is absolute.
@@ -148,6 +174,15 @@ int xenstore_ring_write(struct xenstore_domain_interface *intf, const void *data
  * @retval <0    Negative errno value on failure.
  */
 int xenstore_ring_read(struct xenstore_domain_interface *intf, void *data, size_t len, bool client);
+
+int xenstore_perm_to_wire(enum xs_perm perm, char *wire);
+
+int xenstore_perm_from_wire(char wire, enum xs_perm *perm);
+
+int xenstore_perm_parse_wire(const char *raw, size_t raw_len, struct xs_perm_entry *perms,
+			     size_t perms_num, size_t *parsed_num);
+
+int xenstore_perm_format_wire(char *buf, size_t len, const struct xs_perm_entry *perm);
 
 /**
  * @brief Convert a textual errno representation into its numeric value.

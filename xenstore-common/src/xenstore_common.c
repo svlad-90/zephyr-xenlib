@@ -7,6 +7,8 @@
 
 #include <xenstore_common.h>
 
+#include <stdlib.h>
+
 int xenstore_ring_write(struct xenstore_domain_interface *intf, const void *data, size_t len,
 			bool client)
 {
@@ -71,6 +73,115 @@ int xenstore_ring_read(struct xenstore_domain_interface *intf, void *data, size_
 	}
 
 	return len;
+}
+
+int xenstore_perm_to_wire(enum xs_perm perm, char *wire)
+{
+	if (!wire) {
+		return -EINVAL;
+	}
+
+	switch (perm) {
+	case XS_PERM_NONE:
+		*wire = 'n';
+		return 0;
+	case XS_PERM_READ:
+		*wire = 'r';
+		return 0;
+	case XS_PERM_WRITE:
+		*wire = 'w';
+		return 0;
+	case XS_PERM_BOTH:
+		*wire = 'b';
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+int xenstore_perm_from_wire(char wire, enum xs_perm *perm)
+{
+	if (!perm) {
+		return -EINVAL;
+	}
+
+	switch (wire) {
+	case 'n':
+		*perm = XS_PERM_NONE;
+		return 0;
+	case 'r':
+		*perm = XS_PERM_READ;
+		return 0;
+	case 'w':
+		*perm = XS_PERM_WRITE;
+		return 0;
+	case 'b':
+		*perm = XS_PERM_BOTH;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+int xenstore_perm_parse_wire(const char *raw, size_t raw_len, struct xs_perm_entry *perms,
+			     size_t perms_num, size_t *parsed_num)
+{
+	size_t off = 0;
+	size_t copied = 0;
+
+	if (!raw || !perms || !parsed_num) {
+		return -EINVAL;
+	}
+
+	*parsed_num = 0;
+	while (off < raw_len) {
+		const char *entry = raw + off;
+		const char *nul = memchr(entry, '\0', raw_len - off);
+		char *endptr;
+		unsigned long domid;
+		int ret;
+
+		if (!nul || (nul - entry) < 2) {
+			return -EINVAL;
+		}
+		if (copied == perms_num) {
+			return -E2BIG;
+		}
+
+		ret = xenstore_perm_from_wire(entry[0], &perms[copied].perm);
+		if (ret < 0) {
+			return ret;
+		}
+
+		domid = strtoul(entry + 1, &endptr, 10);
+		if (endptr != nul || domid > DOMID_MASK) {
+			return -EINVAL;
+		}
+
+		perms[copied].domid = (domid_t)domid;
+		copied++;
+		off += (size_t)(nul - entry) + 1;
+	}
+
+	*parsed_num = copied;
+	return 0;
+}
+
+int xenstore_perm_format_wire(char *buf, size_t len, const struct xs_perm_entry *perm)
+{
+	char wire;
+	int ret;
+
+	if (!buf || !perm) {
+		return -EINVAL;
+	}
+
+	ret = xenstore_perm_to_wire(perm->perm, &wire);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return snprintf(buf, len, "%c%u", wire, perm->domid);
 }
 
 int xenstore_get_error(const char *errstr, size_t len)
