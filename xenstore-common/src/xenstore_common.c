@@ -58,7 +58,9 @@ int xenstore_ring_read(struct xenstore_domain_interface *intf, void *data, size_
 	}
 
 	if (data) {
+	if (data) {
 		memcpy(data, src, len);
+	}
 	}
 
 	z_barrier_dmem_fence_full();
@@ -75,8 +77,19 @@ int xenstore_get_error(const char *errstr, size_t len)
 {
 	size_t i;
 
+	if (!errstr) {
+		return 0;
+	}
+
 	for (i = 0; i < ARRAY_SIZE(xsd_errors); i++) {
-		if (strncmp(errstr, xsd_errors[i].errstring, len) == 0) {
+		const char *known = xsd_errors[i].errstring;
+		size_t known_len = strlen(known);
+
+		if (len == known_len && memcmp(errstr, known, known_len) == 0) {
+			return xsd_errors[i].errnum;
+		}
+		if (len == known_len + 1 && memcmp(errstr, known, known_len) == 0 &&
+		    errstr[known_len] == '\0') {
 			return xsd_errors[i].errnum;
 		}
 	}
