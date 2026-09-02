@@ -1401,11 +1401,15 @@ static void handle_read(struct xenstore *xenstore, uint32_t id, char *payload,
 	k_mutex_unlock(&xsel_mutex);
 }
 
-static int xss_do_rm(const char *key, uint32_t caller_id)
+static int xss_do_rm(const char *key, uint32_t caller_id, k_timeout_t tout)
 {
 	struct xs_entry *entry;
+	int rc;
 
-	k_mutex_lock(&xsel_mutex, K_FOREVER);
+	rc = k_mutex_lock(&xsel_mutex, tout);
+	if (rc) {
+		return rc;
+	}
 	entry = key_to_entry_check_perm(key, caller_id, XS_PERM_WRITE);
 	if (!entry) {
 		k_mutex_unlock(&xsel_mutex);
@@ -1420,7 +1424,7 @@ static int xss_do_rm(const char *key, uint32_t caller_id)
 
 int xss_rm(const char *path)
 {
-	int ret = xss_do_rm(path, 0);
+	int ret = xss_do_rm(path, 0, K_FOREVER);
 
 	if (!ret) {
 		notify_watchers(path, 0);
@@ -1432,7 +1436,7 @@ int xss_rm(const char *path)
 static void handle_rm(struct xenstore *xenstore, uint32_t id, char *payload,
 	       uint32_t len)
 {
-	if (xss_do_rm(payload, xenstore->domain->domid)) {
+	if (xss_do_rm(payload, xenstore->domain->domid, K_FOREVER)) {
 		notify_watchers(payload, xenstore->domain->domid);
 		send_reply_read(xenstore, id, XS_RM, "");
 	}
@@ -2069,6 +2073,28 @@ int xs_write_timeout(const char *path, const char *value, uint32_t tx_id, k_time
 	rc = xss_do_write(path, value, 0, &perms, 1, tout);
 	if (rc) {
 		return rc;
+	}
+
+	notify_watchers(path, 0);
+
+	return 0;
+}
+
+int xs_rm_timeout(const char *path, uint32_t tx_id, k_timeout_t tout)
+{
+	int ret;
+
+	if (!path) {
+		return -EINVAL;
+	}
+
+	if (tx_id != XS_TRANSACTION_NONE) {
+		return -ENOTSUP;
+	}
+
+	ret = xss_do_rm(path, 0, tout);
+	if (ret) {
+		return ret;
 	}
 
 	notify_watchers(path, 0);
