@@ -22,3 +22,8 @@ ssize_t xs_read(const char *path, char *buf, size_t len, uint32_t tx_id)
 {
 	return xs_read_timeout(path, buf, len, tx_id, xs_default_timeout());
 }
+
+int xs_write(const char *path, const char *value, uint32_t tx_id)
+{
+	return xs_write_timeout(path, value, tx_id, xs_default_timeout());
+}
