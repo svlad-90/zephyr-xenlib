@@ -10,7 +10,7 @@
 #include <string.h>
 #include <xss.h>
 
-static int xs_read(const struct shell *shell, size_t argc, char **argv)
+static int xenstore_shell_read(const struct shell *shell, size_t argc, char **argv)
 {
 	char buf[CONFIG_XENSTORE_SHELL_READ_SIZE];
 	int rc;
@@ -32,7 +32,7 @@ static int xs_read(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int xs_write(const struct shell *shell, size_t argc, char **argv)
+static int xenstore_shell_write(const struct shell *shell, size_t argc, char **argv)
 {
 	int rc;
 
@@ -48,7 +48,7 @@ static int xs_write(const struct shell *shell, size_t argc, char **argv)
 	return rc;
 }
 
-static void xs_ls_cb(void *data, const char *key, const char *value, int depth)
+static void xenstore_shell_ls_cb(void *data, const char *key, const char *value, int depth)
 {
 	const struct shell *shell = data;
 
@@ -64,7 +64,7 @@ static void xs_ls_cb(void *data, const char *key, const char *value, int depth)
 	}
 }
 
-static int xs_ls(const struct shell *shell, size_t argc, char **argv)
+static int xenstore_shell_ls(const struct shell *shell, size_t argc, char **argv)
 {
 	int rc;
 
@@ -72,7 +72,7 @@ static int xs_ls(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	rc = xss_list_traverse(argv[1], xs_ls_cb, (struct shell *)shell);
+	rc = xss_list_traverse(argv[1], xenstore_shell_ls_cb, (struct shell *)shell);
 	if (rc) {
 		shell_error(shell, "Failed to list xenstore path %s (%d)", argv[1], rc);
 	}
@@ -80,7 +80,7 @@ static int xs_ls(const struct shell *shell, size_t argc, char **argv)
 	return rc;
 }
 
-static int xs_rm(const struct shell *shell, size_t argc, char **argv)
+static int xenstore_shell_rm(const struct shell *shell, size_t argc, char **argv)
 {
 	int rc;
 
@@ -101,18 +101,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(read, NULL,
 			" Read from xenstore\n"
 			" Usage: read <path>\n",
-			xs_read, 2, 0),
+			xenstore_shell_read, 2, 0),
 	SHELL_CMD_ARG(write, NULL,
 			" Write to xenstore\n"
 			" Usage: write <path> <value>\n",
-			xs_write, 3, 0),
+			xenstore_shell_write, 3, 0),
 	SHELL_CMD_ARG(ls, NULL,
 			" List xenstore\n",
-			xs_ls, 2, 0),
+			xenstore_shell_ls, 2, 0),
 	SHELL_CMD_ARG(rm, NULL,
 			" Remove from xenstore\n"
 			" Usage: rm <path>\n",
-			xs_rm, 2, 0),
+			xenstore_shell_rm, 2, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_ARG_REGISTER(xs, &subcmd_xs, "Xenstore commands", NULL, 2, 0);
