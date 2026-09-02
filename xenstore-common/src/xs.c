@@ -37,3 +37,9 @@ ssize_t xs_directory(const char *path, char *buf, size_t len, uint32_t tx_id)
 {
 	return xs_directory_timeout(path, buf, len, tx_id, xs_default_timeout());
 }
+
+ssize_t xs_get_permissions(const char *path, struct xs_perm_entry *perms, size_t perms_num,
+			   uint32_t tx_id)
+{
+	return xs_get_permissions_timeout(path, perms, perms_num, tx_id, xs_default_timeout());
+}

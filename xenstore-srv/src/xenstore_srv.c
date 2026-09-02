@@ -2151,3 +2151,44 @@ ssize_t xs_directory_timeout(const char *path, char *buf, size_t len, uint32_t t
 
 	return reply_sz;
 }
+
+ssize_t xs_get_permissions_timeout(const char *path, struct xs_perm_entry *perms,
+				   size_t perms_num, uint32_t tx_id, k_timeout_t tout)
+{
+	struct xs_entry *entry;
+	struct xs_permissions *iter;
+	size_t total = 0;
+	size_t used = 0;
+	int rc;
+
+	if (!path || (perms_num > 0 && !perms)) {
+		return -EINVAL;
+	}
+
+	if (tx_id != XS_TRANSACTION_NONE) {
+		return -ENOTSUP;
+	}
+
+	rc = k_mutex_lock(&xsel_mutex, tout);
+	if (rc) {
+		return rc;
+	}
+	entry = key_to_entry_check_perm(path, 0, XS_PERM_READ);
+	if (!entry) {
+		k_mutex_unlock(&xsel_mutex);
+		return -ENOENT;
+	}
+
+	SYS_SLIST_FOR_EACH_CONTAINER(&entry->perms, iter, node) {
+		if (used < perms_num) {
+			perms[used].domid = iter->domid;
+			perms[used].perm = iter->perms;
+			used++;
+		}
+		total++;
+	}
+
+	k_mutex_unlock(&xsel_mutex);
+
+	return total;
+}
