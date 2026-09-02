@@ -7,6 +7,28 @@
 
 #include <xenstore_common.h>
 
+int xenstore_perm_to_wire(enum xs_perm perm, char *wire)
+{
+	if (!wire) {
+		return -EINVAL;
+	}
+
+	switch (perm & XS_PERM_BOTH) {
+	case XS_PERM_WRITE:
+		*wire = 'w';
+		return 0;
+	case XS_PERM_READ:
+		*wire = 'r';
+		return 0;
+	case XS_PERM_BOTH:
+		*wire = 'b';
+		return 0;
+	default:
+		*wire = 'n';
+		return 0;
+	}
+}
+
 int xenstore_ring_write(struct xenstore_domain_interface *intf, const void *data, size_t len,
 			bool client)
 {
