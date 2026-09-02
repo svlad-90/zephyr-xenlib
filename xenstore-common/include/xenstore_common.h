@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/types.h>
 #include <xen/public/io/xs_wire.h>
 
 #include <zephyr/sys/barrier.h>
@@ -34,6 +35,16 @@ enum xs_perm {
 };
 
 /**
+ * @brief Xenstore access rights for one domain permission entry.
+ */
+struct xs_perm_entry {
+	/** Domain id whose access is described by this entry. */
+	domid_t domid;
+	/** Access rights granted to @p domid. */
+	enum xs_perm perm;
+};
+
+/**
  * @brief Convert Xenstore permission bits to their wire character.
  *
  * @param perm Permission bits to encode.
@@ -43,6 +54,34 @@ enum xs_perm {
  * @retval -EINVAL @p wire is NULL.
  */
 int xenstore_perm_to_wire(enum xs_perm perm, char *wire);
+
+/**
+ * @brief Convert a Xenstore wire permission character to permission bits.
+ *
+ * @param wire Permission character from a Xenstore wire entry.
+ * @param perm Destination for decoded permission bits.
+ *
+ * @retval 0       Decoded successfully.
+ * @retval -EINVAL @p perm is NULL or @p wire is unknown.
+ */
+int xenstore_perm_from_wire(char wire, enum xs_perm *perm);
+
+/**
+ * @brief Parse NUL-separated Xenstore permission strings.
+ *
+ * @param raw       Wire payload that contains entries such as "r1\0b2\0".
+ * @param raw_len   Number of bytes in @p raw.
+ * @param perms     Destination array for decoded permission entries, or NULL
+ *                  to only count validated entries.
+ * @param perms_num Number of entries available in @p perms.
+ *
+ * @retval >=0      Number of decoded entries.
+ * @retval -EINVAL  Invalid argument.
+ * @retval -ENOSPC  @p perms does not have enough entries.
+ * @retval -EPROTO  Malformed wire payload.
+ */
+ssize_t xenstore_perm_parse_wire(const char *raw, size_t raw_len, struct xs_perm_entry *perms,
+				 size_t perms_num);
 
 /**
  * @brief Check whether a given path is absolute.

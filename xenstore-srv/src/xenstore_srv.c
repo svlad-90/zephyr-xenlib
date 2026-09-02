@@ -614,7 +614,7 @@ static void free_node(struct xs_entry *entry)
 }
 
 static int set_perms_by_array(struct xs_entry *entry,
-			      struct xs_permissions *new_perms,
+			      const struct xs_perm_entry *new_perms,
 			      size_t perms_num)
 {
 	size_t i;
@@ -630,7 +630,7 @@ static int set_perms_by_array(struct xs_entry *entry,
 			goto alloc_err;
 		}
 		perms->domid = new_perms[i].domid;
-		perms->perms = new_perms[i].perms;
+		perms->perms = new_perms[i].perm;
 		sys_slist_append(&list_perm, &perms->node);
 	}
 
@@ -647,73 +647,41 @@ alloc_err:
 	return -ENOMEM;
 }
 
-static struct xs_permissions *deserialize_perms(const char *strings, const size_t str_len,
-						size_t *perms_num)
+static struct xs_perm_entry *deserialize_perms(const char *strings, const size_t str_len,
+					       size_t *perms_num)
 {
-	struct xs_permissions *perms;
-	const char *ptr;
-	char *str_endptr;
-	size_t i, j;
+	struct xs_perm_entry *perms;
+	ssize_t parsed_num;
 
 	if (!strings || !perms_num) {
 		return NULL;
 	}
 
 	*perms_num = 0;
-	ptr = strings;
-	/* Count the number of perms to further memory allocation */
-	for (i = 0; i < str_len;) {
-		i += strlen(ptr + i) + 1;
-		(*perms_num)++;
+
+	parsed_num = xenstore_perm_parse_wire(strings, str_len, NULL, 0);
+	if (parsed_num <= 0) {
+		return NULL;
 	}
 
-	perms = k_malloc(sizeof(*perms) * (*perms_num));
+	perms = k_malloc(sizeof(*perms) * (size_t)parsed_num);
 	if (!perms) {
 		return NULL;
 	}
 
-	for (i = 0, j = 0; i < str_len && j < (*perms_num); j++) {
-		switch (ptr[i]) {
-		case 'w':
-			perms[j].perms = XS_PERM_WRITE;
-			break;
-		case 'r':
-			perms[j].perms = XS_PERM_READ;
-			break;
-		case 'b':
-			perms[j].perms = (XS_PERM_READ | XS_PERM_WRITE);
-			break;
-		case 'n':
-			perms[j].perms = XS_PERM_NONE;
-			break;
-		default:
-			goto err_free;
-		}
-		if (i + 1 >= str_len) {
-			goto err_free;
-		}
-
-		perms[j].domid = strtoul(ptr + i + 1, &str_endptr, 10);
-		/* If str_endptr is not pointing to terminating null, conversion is failed */
-		if (*str_endptr != '\0') {
-			goto err_free;
-		}
-
-		i += strlen(ptr + i) + 1;
+	if (xenstore_perm_parse_wire(strings, str_len, perms, (size_t)parsed_num) != parsed_num) {
+		k_free(perms);
+		return NULL;
 	}
 
+	*perms_num = (size_t)parsed_num;
 	return perms;
-
-err_free:
-	k_free(perms);
-	*perms_num = 0;
-	return NULL;
 }
 
 static int set_perms_by_strings(struct xs_entry *entry, const char *perm_str,
 				const size_t perms_len)
 {
-	struct xs_permissions *new_perms;
+	struct xs_perm_entry *new_perms;
 	size_t perms_num;
 	int rc;
 
@@ -768,7 +736,7 @@ ret_err:
 }
 
 static int xss_do_write(const char *const_path, const char *data, uint32_t domid,
-			struct xs_permissions *perms, size_t perms_num)
+			const struct xs_perm_entry *perms, size_t perms_num)
 {
 	int rc = 0;
 	struct xs_entry *iter = NULL, *insert_entry = NULL, *parent_entry = NULL;
@@ -928,9 +896,9 @@ pentry_fail:
 int xss_write(const char *path, const char *value)
 {
 	int rc;
-	struct xs_permissions perms = {
+	struct xs_perm_entry perms = {
 		.domid = 0,
-		.perms = XS_PERM_NONE,
+		.perm = XS_PERM_NONE,
 	};
 
 	if (!path || !value) {
@@ -951,9 +919,9 @@ int xss_write(const char *path, const char *value)
 int xss_write_guest_domain_rw(const char *path, const char *value, uint32_t domid)
 {
 	int rc;
-	struct xs_permissions perms = {
+	struct xs_perm_entry perms = {
 		.domid = domid,
-		.perms = XS_PERM_NONE,
+		.perm = XS_PERM_NONE,
 	};
 
 	if (!path || !value) {
@@ -975,14 +943,14 @@ int xss_write_guest_domain_rw(const char *path, const char *value, uint32_t domi
 int xss_write_guest_domain_ro(const char *path, const char *value, uint32_t domid)
 {
 	int rc;
-	struct xs_permissions perms[2] = {
+	struct xs_perm_entry perms[2] = {
 		{
 			.domid = 0,
-			.perms = XS_PERM_NONE,
+			.perm = XS_PERM_NONE,
 		},
 		{
 			.domid = domid,
-			.perms = XS_PERM_READ,
+			.perm = XS_PERM_READ,
 		},
 	};
 
@@ -1013,14 +981,14 @@ int xss_write_guest_with_permissions(const char *path, const char *value, uint32
 				     uint32_t domid2)
 {
 	int rc;
-	struct xs_permissions perms[2] = {
+	struct xs_perm_entry perms[2] = {
 		{
 			.domid = domid1,
-			.perms = XS_PERM_NONE,
+			.perm = XS_PERM_NONE,
 		},
 		{
 			.domid = domid2,
-			.perms = XS_PERM_READ,
+			.perm = XS_PERM_READ,
 		},
 	};
 
@@ -1124,9 +1092,9 @@ int xss_set_perm(const char *path, domid_t domid, enum xs_perm perm)
 {
 	int rc;
 	struct xs_entry *entry;
-	struct xs_permissions permissions = {
+	struct xs_perm_entry permissions = {
 		.domid = domid,
-		.perms = perm,
+		.perm = perm,
 	};
 
 	k_mutex_lock(&xsel_mutex, K_FOREVER);
@@ -2023,9 +1991,9 @@ int stop_domain_stored(struct xen_domain *domain)
 
 int xs_init_root(void)
 {
-	struct xs_permissions permissions = {
+	struct xs_perm_entry permissions = {
 		.domid = 0,
-		.perms = XS_PERM_NONE,
+		.perm = XS_PERM_NONE,
 	};
 
 	sys_dlist_init(&root_xenstore.child_list);
@@ -2033,4 +2001,3 @@ int xs_init_root(void)
 
 	return set_perms_by_array(&root_xenstore, &permissions, 1);
 }
-
