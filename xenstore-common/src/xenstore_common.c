@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdlib.h>
+
 #include <xenstore_common.h>
 
 int xenstore_perm_to_wire(enum xs_perm perm, char *wire)
@@ -27,6 +29,78 @@ int xenstore_perm_to_wire(enum xs_perm perm, char *wire)
 		*wire = 'n';
 		return 0;
 	}
+}
+
+int xenstore_perm_from_wire(char wire, enum xs_perm *perm)
+{
+	if (!perm) {
+		return -EINVAL;
+	}
+
+	switch (wire) {
+	case 'w':
+		*perm = XS_PERM_WRITE;
+		return 0;
+	case 'r':
+		*perm = XS_PERM_READ;
+		return 0;
+	case 'b':
+		*perm = XS_PERM_BOTH;
+		return 0;
+	case 'n':
+		*perm = XS_PERM_NONE;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+ssize_t xenstore_perm_parse_wire(const char *raw, size_t raw_len, struct xs_perm_entry *perms,
+				 size_t perms_num)
+{
+	size_t copied = 0;
+
+	if (!raw || (!perms && perms_num != 0)) {
+		return -EINVAL;
+	}
+
+	for (size_t off = 0; off < raw_len;) {
+		enum xs_perm perm;
+		unsigned long domid;
+		const char *entry = raw + off;
+		size_t entry_len = strnlen(entry, raw_len - off);
+		char *endptr;
+		int ret;
+
+		if (entry_len == (raw_len - off) || entry_len < 2) {
+			return -EPROTO;
+		}
+
+		if (perms && copied >= perms_num) {
+			return -ENOSPC;
+		}
+
+		ret = xenstore_perm_from_wire(entry[0], &perm);
+		if (ret < 0) {
+			return ret;
+		}
+
+		errno = 0;
+		domid = strtoul(entry + 1, &endptr, 10);
+		if ((endptr == (entry + 1)) || (*endptr != '\0') || (errno == ERANGE) ||
+		    ((domid & DOMID_MASK) != domid)) {
+			return -EPROTO;
+		}
+
+		if (perms) {
+			perms[copied].domid = (domid_t)domid;
+			perms[copied].perm = perm;
+		}
+		copied++;
+		off += entry_len + 1;
+	}
+
+	return copied;
 }
 
 int xenstore_ring_write(struct xenstore_domain_interface *intf, const void *data, size_t len,
