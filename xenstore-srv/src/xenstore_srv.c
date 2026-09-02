@@ -2192,3 +2192,33 @@ ssize_t xs_get_permissions_timeout(const char *path, struct xs_perm_entry *perms
 
 	return total;
 }
+
+int xs_set_permissions_timeout(const char *path, const struct xs_perm_entry *perms,
+			       size_t perms_num, uint32_t tx_id, k_timeout_t tout)
+{
+	struct xs_entry *entry;
+	int rc;
+
+	if (!path || !perms || perms_num == 0) {
+		return -EINVAL;
+	}
+
+	if (tx_id != XS_TRANSACTION_NONE) {
+		return -ENOTSUP;
+	}
+
+	rc = k_mutex_lock(&xsel_mutex, tout);
+	if (rc) {
+		return rc;
+	}
+	entry = key_to_entry_check_perm(path, 0, XS_PERM_NONE);
+	if (!entry) {
+		k_mutex_unlock(&xsel_mutex);
+		return -ENOENT;
+	}
+
+	rc = set_perms_by_array(entry, perms, perms_num);
+	k_mutex_unlock(&xsel_mutex);
+
+	return rc;
+}
