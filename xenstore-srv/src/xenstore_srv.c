@@ -20,6 +20,7 @@
 #include <zephyr/xen/hvm.h>
 
 #include <xenstore_common.h>
+#include <xs.h>
 #include <mem-mgmt.h>
 #include "domain.h"
 #include "xen/public/io/xs_wire.h"
@@ -2000,4 +2001,9 @@ int xs_init_root(void)
 	sys_dnode_init(&root_xenstore.node);
 
 	return set_perms_by_array(&root_xenstore, &permissions, 1);
+}
+
+int xs_init(void)
+{
+	return 0;
 }
