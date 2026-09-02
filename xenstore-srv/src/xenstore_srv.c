@@ -1259,20 +1259,6 @@ static void handle_control(struct xenstore *xenstore, uint32_t id,
 	send_reply(xenstore, id, XS_CONTROL, "OK");
 }
 
-static char perm_to_char(const uint32_t perm)
-{
-	switch (perm & XS_PERM_BOTH) {
-	case XS_PERM_WRITE:
-		return 'w';
-	case XS_PERM_READ:
-		return 'r';
-	case XS_PERM_BOTH:
-		return 'b';
-	default:
-		return 'n';
-	}
-}
-
 /* The function allocates memory for the buffer, that should be freed by caller */
 static char *serialize_perms(struct xs_entry *entry, size_t *total_size)
 {
@@ -1297,8 +1283,17 @@ static char *serialize_perms(struct xs_entry *entry, size_t *total_size)
 	}
 
 	SYS_SLIST_FOR_EACH_CONTAINER(&entry->perms, iter, node) {
+		char wire_perm;
+		int rc;
+
+		rc = xenstore_perm_to_wire(iter->perms, &wire_perm);
+		if (rc) {
+			k_free(perm_str);
+			*total_size = 0;
+			return NULL;
+		}
 		curr_len = snprintf(&perm_str[*total_size], UINT32_MAX_STR_LEN + 1, "%c%u",
-				    perm_to_char(iter->perms), iter->domid);
+				    wire_perm, iter->domid);
 		/* Add size for terminating NULL */
 		*total_size += curr_len + 1;
 	}

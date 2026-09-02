@@ -34,6 +34,17 @@ enum xs_perm {
 };
 
 /**
+ * @brief Convert Xenstore permission bits to their wire character.
+ *
+ * @param perm Permission bits to encode.
+ * @param wire Destination for the encoded permission character.
+ *
+ * @retval 0       Encoded successfully.
+ * @retval -EINVAL @p wire is NULL.
+ */
+int xenstore_perm_to_wire(enum xs_perm perm, char *wire);
+
+/**
  * @brief Check whether a given path is absolute.
  *
  * @param path Path string to validate.
