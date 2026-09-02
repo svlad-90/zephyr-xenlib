@@ -125,6 +125,50 @@ int xs_rm_timeout(const char *path, uint32_t tx_id, k_timeout_t tout);
  */
 int xs_rm(const char *path, uint32_t tx_id);
 
+/**
+ * @brief List child names below a XenStore path.
+ *
+ * The returned byte stream contains NUL-separated child names.
+ *
+ * If @p buf is too small, the implementation copies bytes from the beginning
+ * of the directory stream until @p buf is full. The return value is still the
+ * full directory stream length, so callers can detect truncation with @c ret >
+ * len.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[out]    buf        Destination buffer for the directory stream. May be NULL when
+ *                           @p len is 0 and the caller only needs the required length.
+ * @param[in]     len        Size of @p buf in bytes.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ * @param[in]     tout       Maximum time to wait for the operation.
+ *
+ * @return Directory stream length in bytes on success, even when @p buf is too
+ *         small.
+ * @retval -errno on failure.
+ */
+ssize_t xs_directory_timeout(const char *path, char *buf, size_t len, uint32_t tx_id,
+			     k_timeout_t tout);
+
+/**
+ * @brief List child names below a XenStore path using the default timeout.
+ *
+ * If @p buf is too small, the implementation copies bytes from the beginning
+ * of the directory stream until @p buf is full. The return value is still the
+ * full directory stream length, so callers can detect truncation with @c ret >
+ * len.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[out]    buf        Destination buffer for the NUL-separated directory stream. May
+ *                           be NULL when @p len is 0.
+ * @param[in]     len        Size of @p buf in bytes.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ *
+ * @return Directory stream length in bytes on success, even when @p buf is too
+ *         small.
+ * @retval -errno on failure.
+ */
+ssize_t xs_directory(const char *path, char *buf, size_t len, uint32_t tx_id);
+
 #ifdef __cplusplus
 }
 #endif

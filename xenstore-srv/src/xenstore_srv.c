@@ -2101,3 +2101,53 @@ int xs_rm_timeout(const char *path, uint32_t tx_id, k_timeout_t tout)
 
 	return 0;
 }
+
+ssize_t xs_directory_timeout(const char *path, char *buf, size_t len, uint32_t tx_id,
+			     k_timeout_t tout)
+{
+	struct xs_entry *entry, *iter;
+	size_t reply_sz = 0;
+	size_t used = 0;
+	int rc;
+
+	if (!path || (len > 0 && !buf)) {
+		return -EINVAL;
+	}
+
+	if (tx_id != XS_TRANSACTION_NONE) {
+		return -ENOTSUP;
+	}
+
+	rc = k_mutex_lock(&xsel_mutex, tout);
+	if (rc) {
+		return rc;
+	}
+	entry = key_to_entry_check_perm(path, 0, XS_PERM_READ);
+	if (!entry) {
+		k_mutex_unlock(&xsel_mutex);
+		return -ENOENT;
+	}
+
+	SYS_DLIST_FOR_EACH_CONTAINER(&entry->child_list, iter, node) {
+		reply_sz += xenstore_str_byte_size(iter->key);
+	}
+
+	if (buf && len > 0) {
+		SYS_DLIST_FOR_EACH_CONTAINER(&entry->child_list, iter, node) {
+			size_t name_len = xenstore_str_byte_size(iter->key);
+			size_t copy_len;
+
+			if (used >= len) {
+				break;
+			}
+
+			copy_len = MIN(name_len, len - used);
+			memcpy(buf + used, iter->key, copy_len);
+			used += copy_len;
+		}
+	}
+
+	k_mutex_unlock(&xsel_mutex);
+
+	return reply_sz;
+}
