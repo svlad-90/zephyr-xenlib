@@ -32,3 +32,8 @@ int xs_rm(const char *path, uint32_t tx_id)
 {
 	return xs_rm_timeout(path, tx_id, xs_default_timeout());
 }
+
+ssize_t xs_directory(const char *path, char *buf, size_t len, uint32_t tx_id)
+{
+	return xs_directory_timeout(path, buf, len, tx_id, xs_default_timeout());
+}
