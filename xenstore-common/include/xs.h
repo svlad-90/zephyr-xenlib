@@ -77,6 +77,31 @@ ssize_t xs_read_timeout(const char *path, char *buf, size_t len, uint32_t tx_id,
  */
 ssize_t xs_read(const char *path, char *buf, size_t len, uint32_t tx_id);
 
+/**
+ * @brief Write a value to a XenStore path.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[in]     value      NUL-terminated value to write.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ * @param[in]     tout       Maximum time to wait for the operation.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_write_timeout(const char *path, const char *value, uint32_t tx_id, k_timeout_t tout);
+
+/**
+ * @brief Write a value to a XenStore path using the default timeout.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[in]     value      NUL-terminated value to write.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_write(const char *path, const char *value, uint32_t tx_id);
+
 #ifdef __cplusplus
 }
 #endif

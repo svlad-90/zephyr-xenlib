@@ -738,7 +738,7 @@ ret_err:
 }
 
 static int xss_do_write(const char *const_path, const char *data, uint32_t domid,
-			const struct xs_perm_entry *perms, size_t perms_num)
+			const struct xs_perm_entry *perms, size_t perms_num, k_timeout_t tout)
 {
 	int rc = 0;
 	struct xs_entry *iter = NULL, *insert_entry = NULL, *parent_entry = NULL;
@@ -754,7 +754,11 @@ static int xss_do_write(const char *const_path, const char *data, uint32_t domid
 	}
 
 	strcpy(path, const_path);
-	k_mutex_lock(&xsel_mutex, K_FOREVER);
+	rc = k_mutex_lock(&xsel_mutex, tout);
+	if (rc) {
+		k_free(path);
+		return rc;
+	}
 	parent_entry = &root_xenstore;
 
 	for (tok = strtok_r(path, "/", &tok_state); tok != NULL; tok = strtok_r(NULL, "/", &tok_state)) {
@@ -908,7 +912,7 @@ int xss_write(const char *path, const char *value)
 		return -EINVAL;
 	}
 
-	rc = xss_do_write(path, value, 0, &perms, 1);
+	rc = xss_do_write(path, value, 0, &perms, 1, K_FOREVER);
 	if (rc) {
 		LOG_ERR("Failed to write to xenstore (rc=%d)", rc);
 	} else {
@@ -931,7 +935,7 @@ int xss_write_guest_domain_rw(const char *path, const char *value, uint32_t domi
 		return -EINVAL;
 	}
 
-	rc = xss_do_write(path, value, 0, &perms, 1);
+	rc = xss_do_write(path, value, 0, &perms, 1, K_FOREVER);
 	if (rc) {
 		LOG_ERR("Failed to write to xenstore (rc=%d)", rc);
 	} else {
@@ -966,9 +970,9 @@ int xss_write_guest_domain_ro(const char *path, const char *value, uint32_t domi
 	 * no need to set additionally read permission.
 	 */
 	if (domid == 0) {
-		rc = xss_do_write(path, value, 0, perms, 1);
+		rc = xss_do_write(path, value, 0, perms, 1, K_FOREVER);
 	} else {
-		rc = xss_do_write(path, value, 0, perms, 2);
+		rc = xss_do_write(path, value, 0, perms, 2, K_FOREVER);
 	}
 	if (rc) {
 		LOG_ERR("Failed to write to xenstore (rc=%d)", rc);
@@ -999,7 +1003,7 @@ int xss_write_guest_with_permissions(const char *path, const char *value, uint32
 		return -EINVAL;
 	}
 
-	rc = xss_do_write(path, value, 0, perms, 2);
+	rc = xss_do_write(path, value, 0, perms, 2, K_FOREVER);
 
 	if (rc) {
 		LOG_ERR("Failed to write to xenstore (rc=%d)", rc);
@@ -1166,7 +1170,7 @@ static void _handle_write(struct xenstore *xenstore, uint32_t id,
 		goto free_path;
 	}
 
-	rc = xss_do_write(path, data, domain->domid, NULL, 0);
+	rc = xss_do_write(path, data, domain->domid, NULL, 0, K_FOREVER);
 	if (rc) {
 		LOG_ERR("Failed to write to xenstore (rc=%d)", rc);
 		send_errno(xenstore, id, rc);
@@ -2044,4 +2048,30 @@ ssize_t xs_read_timeout(const char *path, char *buf, size_t len, uint32_t tx_id,
 	k_mutex_unlock(&xsel_mutex);
 
 	return value_len;
+}
+
+int xs_write_timeout(const char *path, const char *value, uint32_t tx_id, k_timeout_t tout)
+{
+	struct xs_perm_entry perms = {
+		.domid = 0,
+		.perm = XS_PERM_NONE,
+	};
+	int rc;
+
+	if (!path || !value) {
+		return -EINVAL;
+	}
+
+	if (tx_id != XS_TRANSACTION_NONE) {
+		return -ENOTSUP;
+	}
+
+	rc = xss_do_write(path, value, 0, &perms, 1, tout);
+	if (rc) {
+		return rc;
+	}
+
+	notify_watchers(path, 0);
+
+	return 0;
 }
