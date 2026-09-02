@@ -12,6 +12,7 @@
 
 #include <xen/public/xen.h>
 #include <xenstore_common.h>
+#include <xs.h>
 
 /**
  * @brief Xenstore access control Interface
