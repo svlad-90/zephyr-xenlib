@@ -37,6 +37,46 @@ void xs_set_default_timeout(k_timeout_t tout);
  */
 int xs_init(void);
 
+/**
+ * @brief Read the value stored at a XenStore path.
+ *
+ * When @p buf is not large enough for the full value, the implementation
+ * copies the longest prefix that fits and NUL-terminates @p buf. The return
+ * value is still the full value length, so callers can detect truncation with
+ * @c ret >= len when @p len is greater than 0.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[out]    buf        Destination buffer for the value. May be NULL when @p len is 0
+ *                           and the caller only needs the required value length.
+ * @param[in]     len        Size of @p buf in bytes.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE outside a
+ *                           transaction.
+ * @param[in]     tout       Maximum time to wait for the operation.
+ *
+ * @return Value length in bytes on success, even when @p buf is too small.
+ * @retval -errno on failure.
+ */
+ssize_t xs_read_timeout(const char *path, char *buf, size_t len, uint32_t tx_id,
+			k_timeout_t tout);
+
+/**
+ * @brief Read the value stored at a XenStore path using the default timeout.
+ *
+ * When @p buf is not large enough for the full value, the implementation
+ * copies the longest prefix that fits and NUL-terminates @p buf. The return
+ * value is still the full value length, so callers can detect truncation with
+ * @c ret >= len when @p len is greater than 0.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[out]    buf        Destination buffer for the value. May be NULL when @p len is 0.
+ * @param[in]     len        Size of @p buf in bytes.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ *
+ * @return Value length in bytes on success, even when @p buf is too small.
+ * @retval -errno on failure.
+ */
+ssize_t xs_read(const char *path, char *buf, size_t len, uint32_t tx_id);
+
 #ifdef __cplusplus
 }
 #endif
