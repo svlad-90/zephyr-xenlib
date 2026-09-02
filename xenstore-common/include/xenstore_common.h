@@ -20,6 +20,20 @@
 #include <zephyr/xen/events.h>
 
 /**
+ * @brief Xenstore entry access permissions.
+ */
+enum xs_perm {
+	/** Xenstore entry owner permissions. */
+	XS_PERM_NONE = 0x0,
+	/** Xenstore entry read permissions for guest domain. */
+	XS_PERM_READ = 0x1,
+	/** Xenstore entry write permissions for guest domain. */
+	XS_PERM_WRITE = 0x2,
+	/** Xenstore entry read and write permissions for guest domain. */
+	XS_PERM_BOTH = XS_PERM_WRITE | XS_PERM_READ
+};
+
+/**
  * @brief Check whether a given path is absolute.
  *
  * @param path Path string to validate.
