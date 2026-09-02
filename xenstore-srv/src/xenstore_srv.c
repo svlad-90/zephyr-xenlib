@@ -2222,3 +2222,29 @@ int xs_set_permissions_timeout(const char *path, const struct xs_perm_entry *per
 
 	return rc;
 }
+
+int xs_mkdir_timeout(const char *path, uint32_t tx_id, k_timeout_t tout)
+{
+	struct xs_perm_entry perms = {
+		.domid = 0,
+		.perm = XS_PERM_NONE,
+	};
+	int ret;
+
+	if (!path) {
+		return -EINVAL;
+	}
+
+	if (tx_id != XS_TRANSACTION_NONE) {
+		return -ENOTSUP;
+	}
+
+	ret = xss_do_write(path, "", 0, &perms, 1, tout);
+	if (ret) {
+		return ret;
+	}
+
+	notify_watchers(path, 0);
+
+	return 0;
+}

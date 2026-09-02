@@ -243,6 +243,29 @@ int xs_set_permissions_timeout(const char *path, const struct xs_perm_entry *per
 int xs_set_permissions(const char *path, const struct xs_perm_entry *perms, size_t perms_num,
 		       uint32_t tx_id);
 
+/**
+ * @brief Create a XenStore directory path.
+ *
+ * @param[in]     path       Absolute XenStore path to create.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ * @param[in]     tout       Maximum time to wait for the operation.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_mkdir_timeout(const char *path, uint32_t tx_id, k_timeout_t tout);
+
+/**
+ * @brief Create a XenStore directory path using the default timeout.
+ *
+ * @param[in]     path       Absolute XenStore path to create.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_mkdir(const char *path, uint32_t tx_id);
+
 #ifdef __cplusplus
 }
 #endif

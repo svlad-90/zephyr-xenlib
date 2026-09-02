@@ -49,3 +49,8 @@ int xs_set_permissions(const char *path, const struct xs_perm_entry *perms, size
 {
 	return xs_set_permissions_timeout(path, perms, perms_num, tx_id, xs_default_timeout());
 }
+
+int xs_mkdir(const char *path, uint32_t tx_id)
+{
+	return xs_mkdir_timeout(path, tx_id, xs_default_timeout());
+}
