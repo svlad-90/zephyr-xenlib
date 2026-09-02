@@ -102,6 +102,29 @@ int xs_write_timeout(const char *path, const char *value, uint32_t tx_id, k_time
  */
 int xs_write(const char *path, const char *value, uint32_t tx_id);
 
+/**
+ * @brief Remove a XenStore path.
+ *
+ * @param[in]     path       Absolute XenStore path to remove.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ * @param[in]     tout       Maximum time to wait for the operation.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_rm_timeout(const char *path, uint32_t tx_id, k_timeout_t tout);
+
+/**
+ * @brief Remove a XenStore path using the default timeout.
+ *
+ * @param[in]     path       Absolute XenStore path to remove.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_rm(const char *path, uint32_t tx_id);
+
 #ifdef __cplusplus
 }
 #endif
