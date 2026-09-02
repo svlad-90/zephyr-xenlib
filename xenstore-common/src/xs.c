@@ -43,3 +43,9 @@ ssize_t xs_get_permissions(const char *path, struct xs_perm_entry *perms, size_t
 {
 	return xs_get_permissions_timeout(path, perms, perms_num, tx_id, xs_default_timeout());
 }
+
+int xs_set_permissions(const char *path, const struct xs_perm_entry *perms, size_t perms_num,
+		       uint32_t tx_id)
+{
+	return xs_set_permissions_timeout(path, perms, perms_num, tx_id, xs_default_timeout());
+}

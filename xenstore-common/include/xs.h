@@ -213,6 +213,36 @@ ssize_t xs_get_permissions_timeout(const char *path, struct xs_perm_entry *perms
 ssize_t xs_get_permissions(const char *path, struct xs_perm_entry *perms, size_t perms_num,
 			   uint32_t tx_id);
 
+/**
+ * @brief Replace permissions assigned to a XenStore path.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[in]     perms      Permission entries to store.
+ * @param[in]     perms_num  Number of entries in @p perms.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ * @param[in]     tout       Maximum time to wait for the operation.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_set_permissions_timeout(const char *path, const struct xs_perm_entry *perms,
+			       size_t perms_num, uint32_t tx_id, k_timeout_t tout);
+
+/**
+ * @brief Replace permissions assigned to a XenStore path using the default
+ *        timeout.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[in]     perms      Permission entries to store.
+ * @param[in]     perms_num  Number of entries in @p perms.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ *
+ * @retval 0 on success.
+ * @retval -errno on failure.
+ */
+int xs_set_permissions(const char *path, const struct xs_perm_entry *perms, size_t perms_num,
+		       uint32_t tx_id);
+
 #ifdef __cplusplus
 }
 #endif
