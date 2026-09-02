@@ -169,6 +169,50 @@ ssize_t xs_directory_timeout(const char *path, char *buf, size_t len, uint32_t t
  */
 ssize_t xs_directory(const char *path, char *buf, size_t len, uint32_t tx_id);
 
+/**
+ * @brief Read permissions assigned to a XenStore path.
+ *
+ * If @p perms is too small, the implementation fills the available entries
+ * from the beginning of the permission list. The return value is still the
+ * full permission entry count, so callers can detect truncation with @c ret >
+ * perms_num.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[out]    perms      Destination array for permission entries. May be NULL when
+ *                           @p perms_num is 0 and the caller only needs the entry
+ *                           count.
+ * @param[in]     perms_num  Number of entries available in @p perms.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ * @param[in]     tout       Maximum time to wait for the operation.
+ *
+ * @return Total number of permission entries on success, even when @p perms is
+ *         too small.
+ * @retval -errno on failure.
+ */
+ssize_t xs_get_permissions_timeout(const char *path, struct xs_perm_entry *perms,
+				   size_t perms_num, uint32_t tx_id, k_timeout_t tout);
+
+/**
+ * @brief Read permissions assigned to a XenStore path using the default timeout.
+ *
+ * If @p perms is too small, the implementation fills the available entries
+ * from the beginning of the permission list. The return value is still the
+ * full permission entry count, so callers can detect truncation with @c ret >
+ * perms_num.
+ *
+ * @param[in]     path       Absolute XenStore path.
+ * @param[out]    perms      Destination array for permission entries. May be NULL when
+ *                           @p perms_num is 0.
+ * @param[in]     perms_num  Number of entries available in @p perms.
+ * @param[in]     tx_id      Transaction identifier, or XS_TRANSACTION_NONE.
+ *
+ * @return Total number of permission entries on success, even when @p perms is
+ *         too small.
+ * @retval -errno on failure.
+ */
+ssize_t xs_get_permissions(const char *path, struct xs_perm_entry *perms, size_t perms_num,
+			   uint32_t tx_id);
+
 #ifdef __cplusplus
 }
 #endif
