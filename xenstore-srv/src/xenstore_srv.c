@@ -6,6 +6,7 @@
 
 #undef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE 1
 
 #include <stdint.h>
 #include <string.h>
@@ -2006,4 +2007,41 @@ int xs_init_root(void)
 int xs_init(void)
 {
 	return 0;
+}
+
+ssize_t xs_read_timeout(const char *path, char *buf, size_t len, uint32_t tx_id,
+			k_timeout_t tout)
+{
+	const char *value;
+	size_t value_len;
+	struct xs_entry *entry;
+	int rc;
+
+	if (!path || (len > 0 && !buf)) {
+		return -EINVAL;
+	}
+
+	if (tx_id != XS_TRANSACTION_NONE) {
+		return -ENOTSUP;
+	}
+
+	rc = k_mutex_lock(&xsel_mutex, tout);
+	if (rc) {
+		return rc;
+	}
+	entry = key_to_entry_check_perm(path, 0, XS_PERM_READ);
+	if (!entry) {
+		k_mutex_unlock(&xsel_mutex);
+		return -ENOENT;
+	}
+
+	value = entry->value ? entry->value : "";
+	value_len = strlen(value);
+	if (buf && len > 0) {
+		(void)strlcpy(buf, value, len);
+	}
+
+	k_mutex_unlock(&xsel_mutex);
+
+	return value_len;
 }

@@ -12,3 +12,13 @@ void xs_set_default_timeout(k_timeout_t tout)
 {
 	default_timeout = tout;
 }
+
+static k_timeout_t xs_default_timeout(void)
+{
+	return default_timeout;
+}
+
+ssize_t xs_read(const char *path, char *buf, size_t len, uint32_t tx_id)
+{
+	return xs_read_timeout(path, buf, len, tx_id, xs_default_timeout());
+}
