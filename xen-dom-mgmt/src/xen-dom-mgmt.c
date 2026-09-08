@@ -12,7 +12,9 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/xen/dom0/domctl.h>
 #include <zephyr/xen/dom0/sysctl.h>
+#ifdef CONFIG_XEN_FLASK
 #include <zephyr/xen/flask.h>
+#endif
 #include <zephyr/xen/hvm.h>
 #include <zephyr/logging/log.h>
 
@@ -86,13 +88,15 @@ static void prepare_domain_cfg(struct xen_domain_cfg *dom_cfg,
 	create->max_maptrack_frames = dom_cfg->max_maptrack_frames;
 	create->ssidref = dom_cfg->ssidref;
 
-	if (IS_ENABLED(CONFIG_XEN_FLASK) && dom_cfg->seclabel) {
+#ifdef CONFIG_XEN_FLASK
+	if (dom_cfg->seclabel) {
 		uint32_t ssid;
 		if (!flask_context_to_sid(dom_cfg->seclabel,
 				         strlen(dom_cfg->seclabel),
 				         &ssid))
 			create->ssidref = ssid;
 	}
+#endif
 
 	arch_prepare_domain_cfg(dom_cfg, &create->arch);
 }
